@@ -20,3 +20,24 @@ dev = [
     "pytest-asyncio>=1.4.0",
     "ruff>=0.17.1",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["docs"]
+
+[tool.ruff.lint]
+# E, F: errors and undefined names. I: import order. B: likely bugs.
+# UP: modern Python syntax for 3.12.
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+# Run from the project root so `from settings import settings` and
+# `from graph...` work in tests without installing the project as a package.
+pythonpath = ["."]
+testpaths = ["tests"]
+# Async nodes are tested with plain `async def test_...` functions.
+asyncio_mode = "auto"
+# Tests that call real APIs are marked live and skipped in CI.
+markers = ["live: calls a real external API; run locally only"]
+addopts = "--strict-markers"
