@@ -34,8 +34,7 @@ class PlannedQuestion(BaseModel):
     text: str = Field(description="One specific question that sources can answer.")
     route: Route = Field(
         description=(
-            "document: the uploaded files. web: public sources. "
-            "both: check one against the other."
+            "document: the uploaded files. web: public sources. both: check one against the other."
         )
     )
 
@@ -44,3 +43,42 @@ class PlannerOutput(BaseModel):
     """The sub-questions that together cover the research topic."""
 
     sub_questions: list[PlannedQuestion]
+
+
+# ---------------------------------------------------------------------------
+# P-03 Outline the brief (writer node, writer tier)
+# ---------------------------------------------------------------------------
+
+
+class OutlineSection(BaseModel):
+    """One section of the brief and the sub-questions it answers."""
+
+    title: str = Field(description="A short section title.")
+    sub_question_ids: list[str] = Field(
+        description="Ids of the sub-questions this section answers, for example Q2."
+    )
+
+
+class Outline(BaseModel):
+    """The sections of the brief, in reading order."""
+
+    sections: list[OutlineSection]
+
+
+# ---------------------------------------------------------------------------
+# P-04 Write a section (writer node, writer tier)
+# ---------------------------------------------------------------------------
+
+
+class SectionDraft(BaseModel):
+    """One written section of the brief."""
+
+    # The writer node replaces this title with the outline's title, so the
+    # model cannot rename a section; it is kept so the reply is complete.
+    title: str = Field(description="The section title you were given.")
+    text: str = Field(
+        description=(
+            "The section text. Every sentence that states a fact ends with the id "
+            "of its finding in square brackets, for example [Q2-F1]."
+        )
+    )
