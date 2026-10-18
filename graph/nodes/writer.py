@@ -22,8 +22,10 @@ from graph.state import Finding, Section, SubQuestion
 
 logger = logging.getLogger(__name__)
 
-# A citation marker in the text, for example [Q2-F1].
-MARKER_PATTERN = re.compile(r"\s?\[([A-Za-z0-9-]+)\]")
+# A citation marker in the text: one id, [Q2-F1], or several separated by
+# commas, [Q2-F1, Q2-F3]. P-04 asks for one id per sentence, but the first live
+# run showed the model sometimes lists two; both forms must be checked.
+MARKER_PATTERN = re.compile(r"\s?\[([A-Za-z0-9-]+(?:\s*,\s*[A-Za-z0-9-]+)*)\]")
 
 
 class WriterError(RuntimeError):
@@ -136,20 +138,34 @@ def check_outline(
 
 
 def remove_unknown_markers(section_text: str, allowed_finding_ids: set[str]) -> str:
-    """Keep markers that name a finding in this section's prompt; drop the rest.
+    """Keep only ids that name a finding in this section's prompt.
 
-    A removed marker leaves its sentence uncited. Phase 1 has no critic, so it
-    stays in the draft; phase 5's claim check will catch it.
+    Every id inside a marker is checked, including each id in a list such as
+    [Q2-F1, Q9-F1]. Unknown ids are dropped; a marker left with no ids is
+    removed, which leaves its sentence uncited. Phase 1 has no critic, so that
+    sentence stays in the draft; phase 5's claim check will catch it.
     """
-    removed_markers: list[str] = []
+    removed_ids: list[str] = []
+    multi_id_marker_count = 0
 
-    def keep_or_remove(marker_match: re.Match[str]) -> str:
-        if marker_match.group(1) in allowed_finding_ids:
-            return marker_match.group(0)
-        removed_markers.append(marker_match.group(1))
-        return ""
+    def keep_known_ids(marker_match: re.Match[str]) -> str:
+        nonlocal multi_id_marker_count
+        cited_ids = [cited_id.strip() for cited_id in marker_match.group(1).split(",")]
+        if len(cited_ids) > 1:
+            multi_id_marker_count += 1
+        known_ids = [cited_id for cited_id in cited_ids if cited_id in allowed_finding_ids]
+        removed_ids.extend(
+            cited_id for cited_id in cited_ids if cited_id not in allowed_finding_ids
+        )
+        if not known_ids:
+            return ""
+        leading_space = " " if marker_match.group(0).startswith((" ", "\n", "\t")) else ""
+        return f"{leading_space}[{', '.join(known_ids)}]"
 
-    checked_text = MARKER_PATTERN.sub(keep_or_remove, section_text)
-    if removed_markers:
-        logger.warning("removed unknown markers: %s", removed_markers)
+    checked_text = MARKER_PATTERN.sub(keep_known_ids, section_text)
+    if removed_ids:
+        logger.warning("removed unknown markers: %s", removed_ids)
+    if multi_id_marker_count:
+        # Allowed, but against P-04's one-id rule; counted for prompt tuning.
+        logger.info("markers citing more than one finding: %d", multi_id_marker_count)
     return checked_text
