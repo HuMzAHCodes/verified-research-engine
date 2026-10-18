@@ -123,6 +123,26 @@ async def test_markers_for_findings_not_in_the_prompt_are_removed(make_gateway):
     assert writer_update["draft"][0].text == "Robots. [Q1-F1] Customers. Invented."
 
 
+async def test_every_id_in_a_multi_id_marker_is_checked(make_gateway):
+    writer_model = ScriptedModel(
+        scripted_replies=[
+            outline_reply(("Products", ["Q1"]), ("Customers", ["Q2"]), ("Risks", ["Q3"])),
+            # Found in the first live run: the model put two ids in one marker.
+            section_reply(
+                "Both known. [Q1-F1, Q1-F2] One unknown. [Q1-F1, Q9-F1] None. [Q9-F1, Q2-F1]"
+            ),
+            section_reply("Text. [Q2-F1]"),
+            section_reply("Text. [Q3-F1]"),
+        ]
+    )
+
+    writer_update = await writer_node(
+        writer_state(), gateway=make_gateway(writer_model=writer_model)
+    )
+
+    assert writer_update["draft"][0].text == "Both known. [Q1-F1, Q1-F2] One unknown. [Q1-F1] None."
+
+
 async def test_the_outline_title_replaces_the_model_title(make_gateway):
     writer_model = ScriptedModel(
         scripted_replies=[
