@@ -16,6 +16,7 @@ dependencies = [
 dev = [
     "ipykernel>=7.4.0",
     "nbconvert>=7.17.2",
+    "nbstripout>=0.9.1",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "ruff>=0.17.1",
