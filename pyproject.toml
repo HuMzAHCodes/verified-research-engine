@@ -3,6 +3,7 @@ name = "verified-research-engine"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
+    "fastmcp>=4.1.1",
     "langchain-core>=1.6.10",
     "langchain-mistralai>=1.1.6",
     "langgraph>=1.2.15",
@@ -10,6 +11,7 @@ dependencies = [
     "pydantic-settings>=2.16.0",
     "python-dotenv>=1.2.4",
     "tavily-python>=0.8.5",
+    "trafilatura>=2.3.1",
 ]
 
 [dependency-groups]
