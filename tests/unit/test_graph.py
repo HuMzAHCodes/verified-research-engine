@@ -6,7 +6,9 @@ out, and each part of the run can be checked: the plan, the findings, the
 number of model calls on each tier.
 """
 
-from graph.supervisor import build_graph
+from uuid import uuid4
+
+from graph.supervisor import PHASE_TAG, build_graph, research_run_config
 from tests.conftest import FakeSearchClient, ScriptedModel, search_result
 
 TOPIC = "Due diligence on Symbotic"
@@ -46,7 +48,9 @@ async def test_a_topic_goes_in_and_a_draft_comes_out(make_gateway):
         search_client,
     )
 
-    final_state = await graph.ainvoke({"topic": TOPIC, "document_ids": []})
+    final_state = await graph.ainvoke(
+        {"topic": TOPIC, "document_ids": []}, config=research_run_config(TOPIC, uuid4())
+    )
 
     assert [sub_question.id for sub_question in final_state["sub_questions"]] == ["Q1", "Q2"]
     assert [finding.id for finding in final_state["findings"]] == ["Q1-F1", "Q1-F2", "Q2-F1"]
@@ -55,3 +59,14 @@ async def test_a_topic_goes_in_and_a_draft_comes_out(make_gateway):
     # One planner call on the decision tier; one outline and two sections on the writer tier.
     assert len(planner_model.received_conversations) == 1
     assert len(writer_model.received_conversations) == 3
+
+
+def test_research_run_config_names_tags_and_identifies_the_run():
+    run_id = uuid4()
+
+    run_config = research_run_config(TOPIC, run_id)
+
+    assert run_config["run_name"] == "research-run"
+    assert run_config["run_id"] == run_id
+    assert run_config["tags"] == [PHASE_TAG]
+    assert run_config["metadata"] == {"topic": TOPIC}
