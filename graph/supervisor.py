@@ -14,7 +14,9 @@ subgraph (4), the critic loop (5), the approval gate and checkpointer (6).
 """
 
 from functools import partial
+from uuid import UUID
 
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
@@ -24,6 +26,10 @@ from graph.nodes.researcher import WebSearchClient, researcher_node
 from graph.nodes.writer import writer_node
 from graph.state import RunState
 from settings import settings
+
+# CONCEPT: tracing-from-day-one. Tag on every run's root trace; updated when a
+# phase changes the graph, so traces from different phases can be told apart.
+PHASE_TAG = "phase-1"
 
 
 def build_graph(
@@ -53,3 +59,20 @@ def build_graph(
     graph_builder.add_edge("researcher", "writer")
     graph_builder.add_edge("writer", END)
     return graph_builder.compile()
+
+
+def research_run_config(topic: str, run_id: UUID) -> RunnableConfig:
+    """The config every research run is invoked with.
+
+    CONCEPT: tracing-from-day-one. One brief is one LangSmith trace named
+    research-run, tagged with the phase, with the topic in its metadata. The
+    caller chooses run_id before the run, so the trace's link can be built
+    afterwards without searching for it. Phase 9 adds the job id here, which
+    makes job id, thread id, and trace id one identifier (D-3).
+    """
+    return {
+        "run_name": "research-run",
+        "run_id": run_id,
+        "tags": [PHASE_TAG],
+        "metadata": {"topic": topic},
+    }
