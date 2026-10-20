@@ -2,7 +2,7 @@
 
 Verified Research Engine (VRE) writes sourced research briefs. You give it a topic; it splits the topic into questions, researches each one, and writes a brief in which every factual sentence cites the passage it came from.
 
-> **Status: in development. Phase 1 of 12 is complete (20 October 2026).**
+> **Status: in development. Phase 1 of 12 is complete.**
 > Today a topic goes in and a cited brief comes out, from public web sources. Claim checking, your own PDF documents, human approval, and the API arrive in later phases (see [Roadmap](#roadmap)). Citations in Phase 1 briefs are not yet verified.
 
 When finished, VRE will differ from a general AI report writer in three ways:
