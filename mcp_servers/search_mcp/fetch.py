@@ -29,11 +29,17 @@ from mcp_servers.search_mcp.url_safety import (
 
 READABLE_CONTENT_TYPES = ("text/html", "application/xhtml+xml", "text/plain")
 REDIRECT_STATUS_CODES = frozenset({301, 302, 303, 307, 308})
-USER_AGENT = "VerifiedResearchEngine/0.1 (research brief tool; reads public pages)"
+# A crawler-style User-Agent: the tool's name, its version, and a "+url" where
+# a site owner can see what is reading their pages. The repo is public, so the
+# url reveals nothing new; no email is included, so none lands in site logs.
+USER_AGENT = "VerifiedResearchEngine/0.1 (+https://github.com/HuMzAHCodes/verified-research-engine)"
 # When a page has no article, trafilatura falls back to whatever text it can
-# find, often just a menu or a cookie banner ("Menu", "Accept all"). Main text
-# shorter than this is treated as no readable text.
-MIN_MAIN_TEXT_CHARS = 80
+# find: a menu or a cookie banner ("Menu", "Accept all"), or on a video page the
+# title, a line of description, and footer links (160 characters in the live
+# run). Main text shorter than this is treated as no readable text. 300
+# characters is about two sentences, too little to quote from anyway; the real
+# articles in the live run were all over 2,500.
+MIN_MAIN_TEXT_CHARS = 300
 
 
 class FetchedPage(BaseModel):
