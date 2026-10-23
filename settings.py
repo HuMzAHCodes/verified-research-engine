@@ -6,6 +6,7 @@ place that knows the variable names, their defaults, and their allowed ranges.
 """
 
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 from pydantic import Field, SecretStr, field_validator
@@ -17,6 +18,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # environment, not from the Settings object, so this has to happen first.
 # Existing environment variables win over .env, which is what CI relies on.
 load_dotenv()
+
+# Where search-mcp listens while developing: this machine only, started by hand
+# in its own terminal (D-32). Phase 11 points the variable at the deployed server.
+DEFAULT_SEARCH_MCP_URL = "http://127.0.0.1:8765/mcp"
 
 
 class Settings(BaseSettings):
@@ -58,7 +63,7 @@ class Settings(BaseSettings):
 
     # Storage and services
     vre_data_dir: Path = Path("data")
-    vre_search_mcp_url: str = ""
+    vre_search_mcp_url: str = DEFAULT_SEARCH_MCP_URL
     vre_price_per_million_tokens: float = Field(default=0.0, ge=0)
 
     @field_validator("mistral_api_key", "tavily_api_key", "langsmith_api_key")
@@ -73,6 +78,29 @@ class Settings(BaseSettings):
         if not api_key.get_secret_value().strip():
             raise ValueError("is empty; set it in .env")
         return api_key
+
+    @field_validator("vre_search_mcp_url")
+    @classmethod
+    def require_http_address(cls, server_url: str) -> str:
+        """Check the search-mcp address at start-up, not at the first tool call.
+
+        CONCEPT: mcp-client, decision 8. The value used to mean "empty runs the
+        server locally"; with HTTP on localhost (D-32) there is no such mode, so
+        an empty value is a mistake, most likely a line left over from an older
+        .env. A missing scheme ("127.0.0.1:8765/mcp") is the other common typo.
+        """
+        server_url = server_url.strip()
+        if not server_url:
+            raise ValueError(
+                f"is empty; delete the line from .env to use {DEFAULT_SEARCH_MCP_URL}, "
+                "or set the server's address"
+            )
+        parts = urlsplit(server_url)
+        if parts.scheme not in ("http", "https") or not parts.netloc:
+            raise ValueError(
+                f"must be an http:// or https:// address, such as {DEFAULT_SEARCH_MCP_URL}"
+            )
+        return server_url
 
     @property
     def app_db_path(self) -> Path:
