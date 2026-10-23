@@ -126,6 +126,23 @@ async def test_a_page_with_only_a_menu_fails_as_no_readable_text():
         await fetch("https://example.com/a", {"https://example.com/a": empty_page})
 
 
+async def test_a_page_with_only_leftovers_fails_as_no_readable_text():
+    # A video page: a title, two lines of description, and footer links.
+    # trafilatura keeps 135 characters here, enough to pass the old 80-character
+    # minimum (a live-run video page passed it with 160) but not the new 300.
+    video_page = html_page(
+        "<html><head><title>Symbotic tour</title></head><body>"
+        "<h1>Symbotic warehouse tour</h1>"
+        "<p>A short look inside an automated warehouse, filmed during a customer visit.</p>"
+        "<p>Subscribe for more videos about robotics and supply chains.</p>"
+        "<footer>About Press Copyright Contact us Creators Advertise Terms Privacy</footer>"
+        "</body></html>"
+    )
+
+    with pytest.raises(PageFetchError, match="no readable text"):
+        await fetch("https://example.com/v", {"https://example.com/v": video_page})
+
+
 async def test_downloads_stop_at_the_size_limit():
     long_text = "word " * 50_000  # 250,000 bytes
     long_response = httpx.Response(200, headers={"content-type": "text/plain"}, text=long_text)
