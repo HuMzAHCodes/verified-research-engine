@@ -46,6 +46,42 @@ class PlannerOutput(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# P-02 Extract web findings (researcher node, decision tier)
+# ---------------------------------------------------------------------------
+
+
+class WebFinding(BaseModel):
+    """One piece of evidence from one page: where it is, the text, and what it answers."""
+
+    # CONCEPT: verbatim-extraction. Field order is the order the model writes:
+    # first which page, then the passage copied from it, and only then the
+    # answer, so the answer is written from the passage, not from memory. The
+    # design listed answer first; the fields and their meaning are unchanged.
+    url: str = Field(description="The url of the page the passage comes from, exactly as given.")
+    passage: str = Field(
+        description=(
+            "Text copied word for word from that page: at least one full sentence. "
+            "Do not shorten it, fix it, or join text from two places."
+        )
+    )
+    answer: str = Field(
+        description="One or two sentences that answer the question from the passage."
+    )
+
+
+class WebFindings(BaseModel):
+    """The evidence the pages give for one question."""
+
+    # The node does not trust this flag: the checked findings decide
+    # (verbatim-extraction, decision 6). It lets the model say "nothing here"
+    # without inventing a finding.
+    found: bool = Field(description="False if none of the pages answers the question.")
+    findings: list[WebFinding] = Field(
+        default_factory=list, description="At most three findings; none if found is false."
+    )
+
+
+# ---------------------------------------------------------------------------
 # P-03 Outline the brief (writer node, writer tier)
 # ---------------------------------------------------------------------------
 
