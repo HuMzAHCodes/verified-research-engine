@@ -4,9 +4,9 @@ CONCEPT: scripted-model-testing. Tests replace the model, never the code that
 calls it. ScriptedModel returns replies written in advance, in order, and
 records every conversation it was sent. A real ModelGateway wraps it, so the
 gateway's parsing, retries, and repair message all run in every test, while
-no request leaves the machine. FakeToolbox does the same for search-mcp (and
-FakeSearchClient for the phase 1 researcher, until concept tools-through-mcp
-removes it). pytest loads this file automatically for every test under tests/.
+no request leaves the machine. FakeToolbox does the same for search-mcp; the
+phase 1 FakeSearchClient was removed with the direct search client (D-37).
+pytest loads this file automatically for every test under tests/.
 """
 
 from typing import Any
@@ -118,32 +118,6 @@ def make_gateway():
         )
 
     return build_gateway
-
-
-class FakeSearchClient:
-    """A web search that answers from a dict instead of Tavily.
-
-    CONCEPT: scripted-model-testing, applied to tools. Same idea as
-    ScriptedModel: the node under test is real, only the outside world is
-    fake. A query with no entry returns no results. Every query is recorded.
-    """
-
-    def __init__(self, results_by_query: dict[str, list[dict[str, Any]]] | None = None) -> None:
-        self.results_by_query = results_by_query or {}
-        self.received_queries: list[str] = []
-
-    async def search(self, query: str, max_results: int) -> list[dict[str, Any]]:
-        self.received_queries.append(query)
-        return self.results_by_query.get(query, [])[:max_results]
-
-
-def search_result(page_number: int, content: str = "") -> dict[str, Any]:
-    """One search result in the shape Tavily returns."""
-    return {
-        "url": f"https://example.com/page-{page_number}",
-        "title": f"Page {page_number}",
-        "content": content or f"Text of page {page_number}.",
-    }
 
 
 # A scripted answer for FakeToolbox: the result, or an exception to raise
