@@ -96,9 +96,10 @@ def build_section_messages(title: str, section_findings: list[Finding]) -> list[
 def format_finding_block(finding: Finding) -> str:
     """One finding as the writer sees it.
 
-    Phase 1 findings have no extracted answer (P-02 arrives in phase 3), so
-    the Answer line is left out when empty and the source title and url are
-    given instead.
+    From Phase 2, a web finding carries the answer P-02 wrote from its
+    passage, shown on the Answer line (D-28). A finding without one (a
+    found=False finding) leaves the line out. The source title and url are
+    always given, so the writer can tell sources apart.
     """
     block_lines = [f'<finding id="{finding.id}" source="{finding.source_type}">']
     if finding.answer:
