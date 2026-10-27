@@ -60,8 +60,9 @@ class WebFinding(BaseModel):
     url: str = Field(description="The url of the page the passage comes from, exactly as given.")
     passage: str = Field(
         description=(
-            "Text copied word for word from that page: at least one full sentence. "
-            "Do not shorten it, fix it, or join text from two places."
+            "One to three sentences that sit next to each other on that page, copied "
+            "character for character, including any mistakes. Never join text from "
+            "two places."
         )
     )
     answer: str = Field(
