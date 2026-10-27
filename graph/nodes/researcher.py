@@ -1,94 +1,91 @@
-"""The temporary researcher: one web search per sub-question, no model call.
+"""The researcher: checked web evidence for each sub-question, through MCP only.
 
-CONCEPT: sequential-graph. TEMPORARY (D-18): this node calls Tavily directly,
-which breaks FR-MCP-04 ("the graph reaches tools only through MCP") for phase 1
-only. Phase 2 replaces TavilySearchClient with the MCP toolbox, and phase 3
-replaces this node with one web researcher per sub-question that uses P-02 to
-pick the passage that answers the question. Until then a finding's passage is
-the snippet Tavily returns, so some findings are only loosely relevant.
+CONCEPT: tools-through-mcp. The graph reaches the web only through the toolbox
+(D-37). For each sub-question the researcher:
 
-The search client is injected by build_graph, so tests pass a fake one and
-no test needs a Tavily key or the network.
+1. searches through the toolbox (search-mcp, never a search library),
+2. reads every result at the same time and keeps the first three readable
+   pages, in search-rank order (D-38),
+3. hands the pages to extract_web_findings: one P-02 call, then the checks in
+   code that keep only passages copied word for word (verbatim-extraction).
+
+Failures are split by kind (mcp-client, decision 6): a page or a search that
+fails is skipped and logged, and the sub-question can still end with a "no
+evidence" finding; SearchServerUnavailable is not caught, so a dead server
+stops the run instead of producing a brief with no evidence.
+
+The toolbox and the gateway are injected by build_graph (D-25), so tests pass
+FakeToolbox and ScriptedModel. Phase 3 replaces this node with one
+web_researcher per sub-question, running in parallel; research_sub_question
+is the part that carries over unchanged.
 """
 
+import asyncio
 import logging
 from collections.abc import Mapping
-from typing import Any, Protocol
+from typing import Any
 
-from tavily import AsyncTavilyClient
-
+from graph.extraction import extract_web_findings
+from graph.llm import ModelGateway
+from graph.mcp_client import SearchHit, Toolbox, ToolCallError, WebPage
 from graph.state import Finding, SubQuestion
-from settings import settings
 
 logger = logging.getLogger(__name__)
 
-RESULTS_PER_SUB_QUESTION = 3
-
-
-class WebSearchClient(Protocol):
-    """The shape any search client must have: Tavily now, MCP in phase 2.
-
-    Each result is a dict with at least "url", "title", and "content".
-    """
-
-    async def search(self, query: str, max_results: int) -> list[dict[str, Any]]: ...
-
-
-class TavilySearchClient:
-    """WebSearchClient backed by Tavily's API. Removed in phase 2."""
-
-    def __init__(self) -> None:
-        self.tavily_client = AsyncTavilyClient(api_key=settings.tavily_api_key.get_secret_value())
-
-    async def search(self, query: str, max_results: int) -> list[dict[str, Any]]:
-        search_response = await self.tavily_client.search(
-            query, max_results=max_results, search_depth="basic"
-        )
-        return search_response.get("results", [])
+SEARCH_RESULTS_PER_QUESTION = 5
+PAGES_PER_QUESTION = 3
 
 
 async def researcher_node(
     state: Mapping[str, Any],
     *,
-    search_client: WebSearchClient,
+    gateway: ModelGateway,
+    toolbox: Toolbox,
 ) -> dict[str, list[Finding]]:
-    """Search once per sub-question and turn the results into findings."""
+    """Research every sub-question in turn; Phase 3 runs them in parallel."""
     new_findings: list[Finding] = []
     for sub_question in state["sub_questions"]:
-        search_results = await search_client.search(
-            sub_question.text, max_results=RESULTS_PER_SUB_QUESTION
-        )
-        new_findings.extend(findings_from_results(sub_question, search_results))
+        new_findings.extend(await research_sub_question(sub_question, gateway, toolbox))
     # Only the new findings: the reducer on RunState.findings appends them.
     return {"findings": new_findings}
 
 
-def findings_from_results(
-    sub_question: SubQuestion, search_results: list[dict[str, Any]]
+async def research_sub_question(
+    sub_question: SubQuestion, gateway: ModelGateway, toolbox: Toolbox
 ) -> list[Finding]:
-    """Number the results Q2-F1, Q2-F2, ... and cut each passage (rule G-7)."""
-    usable_results = [result for result in search_results if result.get("content", "").strip()]
-    if not usable_results:
-        logger.info("%s: no search results", sub_question.id)
-        # One "no evidence" finding, so the writer knows this question was
-        # asked and nothing came back, rather than that it was never asked.
-        return [
-            Finding(
-                id=f"{sub_question.id}-F1",
-                sub_question_id=sub_question.id,
-                found=False,
-                source_type="web",
-            )
-        ]
-    return [
-        Finding(
-            id=f"{sub_question.id}-F{position}",
-            sub_question_id=sub_question.id,
-            found=True,
-            source_type="web",
-            locator=result.get("url", ""),
-            title=result.get("title", ""),
-            passage=result["content"].strip()[: settings.vre_passage_max_chars],
-        )
-        for position, result in enumerate(usable_results[:RESULTS_PER_SUB_QUESTION], start=1)
-    ]
+    """Search, read, extract: the checked findings for one sub-question."""
+    try:
+        hits = await toolbox.search(sub_question.text, max_results=SEARCH_RESULTS_PER_QUESTION)
+    except ToolCallError as error:
+        # One failed search costs this sub-question, not the brief.
+        logger.info("%s: search failed (%s)", sub_question.id, error)
+        hits = []
+    pages = await read_pages(sub_question, hits, toolbox)
+    # With no pages, extraction returns one found=False finding and makes no call.
+    extraction = await extract_web_findings(gateway, sub_question, pages)
+    return extraction.findings
+
+
+async def read_pages(
+    sub_question: SubQuestion, hits: list[SearchHit], toolbox: Toolbox
+) -> list[WebPage]:
+    """Read every hit at once and keep the first readable ones, in rank order (D-38).
+
+    CONCEPT: tools-through-mcp, open choice. The reads run at the same time on
+    the one MCP connection, so this takes about as long as the slowest page.
+    Keeping search-rank order, not the order the reads finish, gives the same
+    pages a one-at-a-time loop would, whatever the network timing.
+    """
+    read_outcomes = await asyncio.gather(
+        *(toolbox.fetch(hit.url) for hit in hits), return_exceptions=True
+    )
+    readable_pages: list[WebPage] = []
+    for hit, outcome in zip(hits, read_outcomes, strict=True):
+        if isinstance(outcome, ToolCallError):
+            logger.info("%s: skipped %s (%s)", sub_question.id, hit.url, outcome)
+            continue
+        if isinstance(outcome, BaseException):
+            # SearchServerUnavailable, or a bug: never swallowed.
+            raise outcome
+        readable_pages.append(outcome)
+    return readable_pages[:PAGES_PER_QUESTION]
