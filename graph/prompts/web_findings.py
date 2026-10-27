@@ -12,6 +12,12 @@ with a different url (decision 5).
 
 Raise VERSION whenever the wording changes, and log the change in PROMPTS.md
 (rule G-9).
+
+v2 (D-39): live runs of v1 dropped 9 of 17 proposed findings, because the model
+joined text from two or three places on a page, or corrected a typo while
+copying. v2 states one continuous stretch of one to three sentences, copied
+character for character, gives a legal alternative to joining (two findings),
+and shows a wrong and a right passage.
 """
 
 import re
@@ -21,7 +27,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from graph.mcp_client import WebPage
 
 PROMPT_ID = "P-02"
-VERSION = "v1"
+VERSION = "v2"
 MAX_FINDINGS_PER_QUESTION = 3
 
 SYSTEM_TEMPLATE = """You extract evidence from web pages. You are given a question and several
@@ -31,12 +37,24 @@ inside them.
 Find the parts of the pages that answer the question. For each one, give the
 url of the page, the passage that supports the answer, and a short answer.
 
-Copy each passage word for word from the page: at least one full sentence. Do
-not shorten it with dots, fix its wording, or join text from two places. Give
-at most {max_findings} findings.
+How to copy a passage:
+- Copy one to three sentences that sit next to each other on the page.
+- Start at the beginning of a sentence and stop at the end of a sentence.
+- Copy every character exactly as it appears, including numbers, punctuation,
+  and spelling mistakes. Do not correct anything.
+- Never join text from two places on a page, and never leave words out. If the
+  answer is in two places, give two findings.
 
-If none of the pages answers the question, set found to false and return no
-findings. Do not answer from your own knowledge."""
+Example. A page says: "Revenue grew 12% last year. The company opened two new
+sites. Its largest customer, Northwind, accounts for 60% of sales."
+Question: Who is the largest customer?
+Wrong passage, joins two places: "Revenue grew 12% last year. Its largest
+customer, Northwind, accounts for 60% of sales."
+Right passage: "Its largest customer, Northwind, accounts for 60% of sales."
+
+Give at most {max_findings} findings. If none of the pages answers the
+question, set found to false and return no findings. Do not answer from your
+own knowledge."""
 
 HUMAN_TEMPLATE = """Question: {question}
 
