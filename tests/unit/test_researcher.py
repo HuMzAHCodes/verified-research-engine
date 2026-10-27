@@ -8,7 +8,7 @@ real, so a finding here exists only if its passage is on its page.
 import pytest
 
 from graph.mcp_client import SearchServerUnavailable, ToolCallError
-from graph.nodes.researcher import researcher_node
+from graph.nodes.researcher import WebResearchFailed, researcher_node
 from graph.state import SubQuestion
 from tests.conftest import FakeToolbox, ScriptedModel, search_hit, web_page
 
@@ -138,3 +138,15 @@ async def test_a_server_that_is_gone_stops_the_run(make_gateway, where):
 
     with pytest.raises(SearchServerUnavailable, match="stopped answering"):
         await run_researcher(make_gateway, toolbox, [], [FIRST_QUESTION])
+
+
+async def test_every_search_failing_stops_the_run_instead_of_an_empty_brief(make_gateway):
+    # D-40: a dead network fails every search. One failed search is skipped;
+    # all of them failing means there is nothing to write a brief from.
+    search_down = ToolCallError("search timed out after 15 s")
+    toolbox = FakeToolbox(
+        hits_by_query={FIRST_QUESTION.text: search_down, SECOND_QUESTION.text: search_down}
+    )
+
+    with pytest.raises(WebResearchFailed, match=r"every web search failed \(2 of 2\)"):
+        await run_researcher(make_gateway, toolbox, [], [FIRST_QUESTION, SECOND_QUESTION])
