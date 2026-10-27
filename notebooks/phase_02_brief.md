@@ -4,52 +4,59 @@
 > - Prompts: P-01 v1, P-02 v2, P-03 v1, P-04 v1.
 > - Models: `ministral-8b-latest` (planner, extraction), `ministral-14b-latest` (writer).
 > - Search and page reading: `search-mcp` (MCP), 5 results and up to 3 pages per sub-question.
-> - Run: 6 sub-questions, 12 findings kept, 5 dropped by the checks, 6 sections, 91.3 s.
+> - Run: 6 sub-questions, 14 findings kept, 3 dropped by the checks, 6 sections, 99.4 s.
 > - Phase 2: every passage below occurs word for word on the page it cites, checked in code. Whether each sentence is supported by its passage is checked from phase 5.
 
 ## Symbotic's Core Business Model
 
-Symbotic's core business model is evolving toward an 'operating system' model for supply chain automation [Q1-F1]. This shift involves integrating specialized 'apps,' such as e-commerce and dock management, to achieve full end-to-end automation of supply chains [Q1-F1]. 
+Symbotic's core business model is shifting toward an 'operating system' model for supply chain automation [Q1-F1]. This model integrates specialized 'apps,' such as e-commerce and dock management, to achieve full end-to-end automation [Q1-F1]. 
 
-The company generates revenue through multiple streams, including system sales, software maintenance and support, and operational services [Q1-F2]. Among these, system sales serve as the primary driver of revenue growth [Q1-F2].
+The company generates revenue through multiple streams, including system sales, software maintenance and support, and operational services [Q1-F2]. Among these, system sales serve as the primary driver of growth [Q1-F2].
 
-## Main Customers and Industries Served
+## Symbotic's Main Customers and Industries Served
 
-Symbotic's main customers include Walmart [Q2-F1]. Target is also a key customer for Symbotic [Q2-F1]. Albertsons and C&S Wholesale Grocers are additional major customers of the company [Q2-F1]. These customers primarily operate within the retail, wholesale, and food & beverage sectors [Q2-F1].
+Symbotic's main customers include C&S Wholesale Grocers, Albertsons, Giant Tiger, Target, and Walmart [Q2-F1]. The industries Symbotic serves are grocery, retail, and wholesale [Q2-F1].
 
-## Key Technologies and Innovations
+Walmart is a key customer of Symbotic, expanding its use of the company's systems across multiple distribution centers [Q2-F2]. Symbotic's main customers also include Walmart, Target, Albertsons, and C&S Wholesale Grocers, with a focus on the retail and grocery industries [Q2-F2].
 
-Symbotic develops and integrates its own proprietary technologies, including SymBots and software, to deliver operational advantages in warehouse automation [Q3-F1]. These technologies are designed to work seamlessly with other complementary systems and infrastructure providers [Q3-F1].
+Giant Tiger is listed as a customer in one source but not mentioned in the other [Q2-F1, Q2-F2].
 
-The company’s solutions incorporate AI-enhanced software, which drives efficiency improvements across the supply chain [Q3-F2]. Additionally, Symbotic’s systems utilize dense storage methods to boost warehouse capacity and streamline throughput for optimized operations [Q3-F2].
+## Key Technological Solutions and Products
 
-## Primary Business Risks
+Symbotic offers total warehouse automation solutions designed to improve operations both inside and outside the warehouse, ensuring adaptability to changing needs [Q3-F1]. These solutions include native case handling capabilities, which are tailored for efficient warehouse management [Q3-F2]. Additionally, Symbotic provides the SymMicro System for less-than-case handling, addressing smaller-scale automation requirements [Q3-F2]. The company also integrates AI-powered robotic solutions, enabling flexible and scalable automation throughout warehouse operations [Q3-F2].
 
-Symbotic faces significant risks stemming from its reliance on a limited number of key customers, particularly Walmart, which exposes the company to customer concentration challenges [Q4-F1]. The complexity of managing milestone-driven, multi-year deployments further compounds these risks, creating execution and control difficulties [Q4-F1]. 
+## Primary Operational and Financial Risks
 
-Operational inefficiencies are a critical concern, as large-scale deployments introduce execution risks tied to site readiness, performance criteria, and delivery speed [Q4-F2]. These challenges are exacerbated by issues such as accounting errors and disruptions from product transitions, which highlight broader process and control risks during periods of rapid growth [Q4-F2].
+Symbotic is exposed to significant operational and financial risks stemming from material weaknesses in internal controls over financial reporting [Q4-F1]. These weaknesses have necessitated a restatement of financial results for fiscal year 2024 due to errors in revenue recognition [Q4-F1]. 
 
-## Financial Performance Overview
+The company has identified material weaknesses in its internal controls, which pose a financial risk by potentially leading to inaccuracies in financial reporting and compliance challenges [Q4-F2]. Management is actively implementing measures to address and remediate these weaknesses [Q4-F2].
 
-Symbotic reported a 22% year-over-year increase in revenue for Q3 FY2026, reaching $721 million [Q5-F1]. This growth marked a rise from $592.1 million in the same period the prior year [Q5-F2]. The company achieved a net income of $55 million, a significant improvement from a net loss of $21 million in Q3 FY2025 [Q5-F3]. Adjusted EBITDA more than doubled to $95 million, reflecting strong operational efficiency [Q5-F1]. The gross profit margin also improved to 25%, contributing to the overall profitability [Q5-F2].
+Errors in revenue recognition, including underestimated cost overruns and discrepancies in billable revenue, have further exacerbated financial risks for Symbotic [Q4-F3]. These errors have impacted system revenue, gross profit, income before tax, net income, and adjusted EBITDA for fiscal year 2024, with an estimated financial restatement impact ranging between $30 million and $40 million [Q4-F3]. The company was unable to file its Annual Report on Form 10-K by the prescribed deadline due to the need for additional time to assess and correct these financial impacts [Q4-F1].
 
-## Recent News and Developments
+## Competitive Differentiation in Automation and Robotics
 
-Symbotic reported profitability in the first quarter of fiscal 2026, achieving a net profit of $13 million, which contrasts with a net loss of $17 million in the same period of the prior year [Q6-F1]. Its operational systems expanded to 51 in operation and 57 in deployment during this quarter [Q6-F1]. Revenue increased by 29% year over year, while gross profit rose by 65%, and the company’s cash balance grew to $1.8 billion [Q6-F1].
+Symbotic distinguishes itself in the automation and robotics sector by specializing in warehouse automation within the supply chain industry [Q5-F1]. Its technology platform integrates AI-powered robotic systems to enhance warehouse operations, addressing challenges such as labor shortages, operating costs, and storage space optimization [Q5-F1]. 
 
-However, Symbotic’s stock price declined by nearly 30% over the past three months, primarily due to a share issuance of 10 million shares at a discount, which raised concerns among investors [Q6-F2]. The company’s increased cash balance in Q1 was largely attributed to proceeds from this share issuance [Q6-F2].
+The company is recognized as a leader in the automated guided vehicles (AGVs) and autonomous mobile robots (AMRs) market, setting itself apart through advanced AI-based algorithms and dynamic navigation capabilities for autonomous mobile robots [Q5-F2]. This leadership position is highlighted among competitors like ABB, Locus Robotics, and Geek+ [Q5-F2].
+
+## Recent News and Strategic Developments
+
+Symbotic reported a 52% increase in total revenue for fiscal year 2024, reaching $1,788.2 million [Q6-F1]. This growth was driven by a rise in systems deployed and additional software contracts [Q6-F1].
+
+The company acquired Veo Robotics in August 2024 to enhance operational efficiency and safety [Q6-F2]. This acquisition aims to integrate advanced robotics technology into Symbotic’s platform, potentially lowering operational costs and improving warehouse safety standards [Q6-F2].
+
+Symbotic also announced plans to introduce Nyobolt battery technology in 2025, which will increase the energy capacity of its SymBot robots by six times [Q6-F3]. The new batteries will reduce weight by 40% compared to current solutions, improving performance and operational efficiency [Q6-F3]. The rollout for new production is set to begin in September 2025, with compatibility for retrofitting existing systems [Q6-F3].
 
 ## Sources
 
 - **[Q1-F1]** Symbotic Inc. Q2 2026 Earnings Call Summary. <https://finance.yahoo.com/markets/stocks/articles/symbotic-inc-q2-2026-earnings-123000563.html>
-- **[Q1-F2]** Symbotic Inc.. <https://baike.baidu.com/en/item/Symbotic%20Inc./3160071>
-- **[Q2-F1]** Is Symbotic the Most Promising of These Industrial Automation Stocks?. <https://www.cmcmarkets.com/en-au/opto/is-symbotic-the-most-promising-of-these-industrial-automation-stocks>
+- **[Q1-F2]** Symbotic Inc. <https://baike.baidu.com/en/item/Symbotic%20Inc./3160071>
+- **[Q2-F1]** Symbotic - Wikipedia. <https://en.wikipedia.org/wiki/Symbotic>
+- **[Q2-F2]** 3 Things About Symbotic the Smartest Investors Know | The Motley Fool. <https://www.fool.com/investing/2023/11/25/3-things-about-symbotic-the-smartest-investors-kno/>
 - **[Q3-F1]** Why Symbotic. <https://www.symbotic.com/solutions/why-symbotic/>
 - **[Q3-F2]** Home. <https://www.symbotic.com>
-- **[Q4-F1]** Symbotic Company Growth, Stability & Outlook. <https://builtin.com/company/symbotic/faq/stability-growth>
-- **[Q4-F2]** Symbotic Company Growth, Stability & Outlook. <https://builtin.com/company/symbotic/faq/stability-growth>
-- **[Q5-F1]** Symbotic (SYM) Investor Relations, Earnings Summary & Outlook. <https://quartr.com/companies/symbotic-inc_15144>
-- **[Q5-F2]** Symbotic (SYM) Investor Relations, Earnings Summary & Outlook. <https://quartr.com/companies/symbotic-inc_15144>
-- **[Q5-F3]** Symbotic (SYM) Investor Relations, Earnings Summary & Outlook. <https://quartr.com/companies/symbotic-inc_15144>
-- **[Q6-F1]** Symbotic Could Be a Massive Breakout Stock in 2026 After a 150% Surge in 2025 | The Motley Fool. <https://www.fool.com/investing/2026/02/05/symbotic-could-be-a-massive-breakout-stock-in-2026/>
-- **[Q6-F2]** Symbotic Could Be a Massive Breakout Stock in 2026 After a 150% Surge in 2025 | The Motley Fool. <https://www.fool.com/investing/2026/02/05/symbotic-could-be-a-massive-breakout-stock-in-2026/>
+- **[Q4-F1] [Q4-F2] [Q4-F3]** Symbotic Provides Update to Restatement of Fiscal Year 2024 Financial Results and First Quarter of Fiscal Year 2025 Outlook. <https://www.symbotic.com/news/symbotic-provides-update-to-restatement-of-fiscal-year-2024-financial-results-and-first-quarter-of-fiscal-year-2025-outlook/>
+- **[Q5-F1] [Q5-F2]** Symbotic - Products, Competitors, Financials, Employees, Headquarters Locations. <https://www.cbinsights.com/company/symbotic>
+- **[Q6-F1]** Symbotic Inc. SEC 10-K Report. <https://www.tradingview.com/news/tradingview:a8a64eeb84e43:0-symbotic-inc-sec-10-k-report/>
+- **[Q6-F2]** Symbotic’s Growth and Challenges: Can This Warehouse Automation Stock Deliver Long-Term Gains? <https://www.kavout.com/market-lens/symbotics-growth-and-challenges-can-this-warehouse-automation-stock-deliver-long-term-gains>
+- **[Q6-F3]** How Recent Developments Are Rewriting the Story for Symbotic. <https://finance.yahoo.com/news/recent-developments-rewriting-story-symbotic-172009148.html>
