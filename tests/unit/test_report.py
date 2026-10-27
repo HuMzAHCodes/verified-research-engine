@@ -1,7 +1,8 @@
 """Tests of the brief renderer.
 
 CONCEPT: tracing-from-day-one. The brief file is part of the public record of
-a run, so its shape is tested: sections in order, and only cited sources.
+a run, so its shape is tested: sections in order, only cited sources, one line
+per page, and titles that read as sentences.
 """
 
 from graph.report import cited_finding_ids, render_brief
@@ -51,3 +52,33 @@ def test_no_sources_heading_when_nothing_is_cited():
     brief = render_brief(TOPIC, [Section(title="Empty", text="No markers here.")], FINDINGS)
 
     assert "## Sources" not in brief
+
+
+def test_findings_from_one_page_share_one_source_line():
+    same_page = "https://example.com/report"
+    findings = [
+        web_finding("Q1-F1").model_copy(update={"locator": same_page, "title": "Annual report"}),
+        web_finding("Q1-F2").model_copy(update={"locator": same_page, "title": "Annual report"}),
+        web_finding("Q1-F3"),
+    ]
+
+    brief = render_brief(TOPIC, DRAFT[:1], findings)
+
+    assert "- **[Q1-F1] [Q1-F2]** Annual report. <https://example.com/report>" in brief
+    assert brief.count(same_page) == 1
+    assert "- **[Q1-F3]** Page Q1-F3. <https://example.com/Q1-F3>" in brief
+
+
+def test_a_title_that_already_ends_a_sentence_gets_no_extra_full_stop():
+    findings = [
+        web_finding("Q1-F1").model_copy(update={"title": "Symbotic Inc."}),
+        web_finding("Q1-F2").model_copy(update={"title": "Is Symbotic a buy?"}),
+        web_finding("Q1-F3").model_copy(update={"title": ""}),
+    ]
+
+    brief = render_brief(TOPIC, DRAFT[:1], findings)
+
+    assert "Symbotic Inc. <" in brief
+    assert "Is Symbotic a buy? <" in brief
+    assert "Untitled. <" in brief
+    assert ".." not in brief
