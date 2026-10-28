@@ -40,7 +40,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Send
 
-from graph.llm import ModelGateway
+from graph.llm import MODEL_CALL_BUDGET_KEY, ModelCallBudget, ModelGateway
 from graph.mcp_client import Toolbox
 from graph.nodes.planner import planner_node
 from graph.nodes.researcher import WEB_ROUTES, research_check_node, web_researcher_node
@@ -118,10 +118,20 @@ def research_run_config(topic: str, run_id: UUID) -> RunnableConfig:
     caller chooses run_id before the run, so the trace's link can be built
     afterwards without searching for it. Phase 9 adds the job id here, which
     makes job id, thread id, and trace id one identifier (D-3).
+
+    CONCEPT: shared-throttle, choice C (D-43). Each run gets a fresh
+    ModelCallBudget under configurable. LangGraph passes the run's config to
+    every node, parallel branches included, and the gateway reads the budget
+    from it, so the whole run counts into one budget without any node
+    handling it. Calling this function once per run is what makes the budget
+    per run.
     """
     return {
         "run_name": "research-run",
         "run_id": run_id,
         "tags": [PHASE_TAG],
         "metadata": {"topic": topic},
+        "configurable": {
+            MODEL_CALL_BUDGET_KEY: ModelCallBudget(limit=settings.vre_max_model_calls_per_run)
+        },
     }
