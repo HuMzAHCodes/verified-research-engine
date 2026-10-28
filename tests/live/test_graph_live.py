@@ -1,10 +1,11 @@
-"""Live run of the whole Phase 2 graph: real planner, search-mcp, P-02, writer.
+"""Live run of the whole Phase 3 graph: real planner, parallel researchers, writer.
 
-CONCEPT: sequential-graph, and from Phase 2 tools-through-mcp. Runs only on
-request (`uv run pytest -m live`), with search-mcp running in its own terminal
-(D-32); skipped, with the start command, if it is not. One full run costs up
-to 6 Tavily searches and up to 14 model calls. Prints the brief and the numbers
-for the "What we measured" section of the concept notes.
+CONCEPT: sequential-graph, tools-through-mcp, and from Phase 3 parallel-fan-out.
+Runs only on request (`uv run pytest -m live`), with search-mcp running in its
+own terminal (D-32); skipped, with the start command, if it is not. One full
+run costs up to 6 Tavily searches and up to 14 model calls. Prints the brief
+and the numbers for the "What we measured" section of the concept notes,
+including how long each stage took and when each parallel branch finished.
 """
 
 import logging
@@ -32,13 +33,29 @@ async def test_the_graph_writes_a_brief_for_a_real_topic(caplog):
             f"start it with: {START_SERVER_COMMAND}"
         )
 
+    # CONCEPT: parallel-fan-out. "updates" yields each node's result as soon as
+    # it finishes, so a branch's time is when its update arrives; "values"
+    # yields the whole state after each step, and the last one is the final state.
     started_at = time.perf_counter()
+    finished_at_by_node: dict[str, float] = {}
+    branch_finished_at: list[tuple[str, float]] = []
+    final_state: dict = {}
     async with McpToolbox.connect(settings.vre_search_mcp_url) as toolbox:
         graph = build_graph(ModelGateway(), toolbox)
-        final_state = await graph.ainvoke(
+        async for stream_mode, chunk in graph.astream(
             {"topic": LIVE_TOPIC, "document_ids": []},
             config=research_run_config(LIVE_TOPIC, uuid4()),
-        )
+            stream_mode=["updates", "values"],
+        ):
+            if stream_mode == "values":
+                final_state = chunk
+                continue
+            seconds_so_far = time.perf_counter() - started_at
+            for node_name, node_update in chunk.items():
+                finished_at_by_node[node_name] = seconds_so_far
+                if node_name == "web_researcher" and node_update["findings"]:
+                    sub_question_id = node_update["findings"][0].sub_question_id
+                    branch_finished_at.append((sub_question_id, seconds_so_far))
     elapsed_seconds = time.perf_counter() - started_at
 
     findings = final_state["findings"]
@@ -70,8 +87,23 @@ async def test_the_graph_writes_a_brief_for_a_real_topic(caplog):
     print(f"sections: {len(draft)}")
     print(f"schema retries: {sum('did not fit' in message for message in log_messages)}")
     print(f"transient retries: {sum('transient error' in message for message in log_messages)}")
+    planner_seconds = finished_at_by_node["planner"]
+    research_seconds = finished_at_by_node["research_check"] - planner_seconds
+    writer_seconds = elapsed_seconds - finished_at_by_node["research_check"]
+    print(
+        "branches finished (s after the planner): "
+        + ", ".join(
+            f"{sub_question_id} {finished - planner_seconds:.1f}"
+            for sub_question_id, finished in branch_finished_at
+        )
+    )
+    print(
+        f"stages: planner {planner_seconds:.1f} s, research {research_seconds:.1f} s, "
+        f"writer {writer_seconds:.1f} s"
+    )
     print(f"total time: {elapsed_seconds:.1f} s")
 
+    assert len(branch_finished_at) == len(final_state["sub_questions"])  # TC-RES-01
     assert draft, "the run produced no sections"
     assert all(section.text.strip() for section in draft)
     assert found_count >= 1, "no finding survived the checks"
