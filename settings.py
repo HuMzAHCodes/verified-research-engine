@@ -58,8 +58,20 @@ class Settings(BaseSettings):
     # start-up: VRE_MAX_SUB_QUESTIONS=50 fails here, not as a huge bill later.
     vre_max_sub_questions: int = Field(default=6, ge=1, le=10)
     vre_max_revisions: int = Field(default=3, ge=0, le=10)
-    vre_throttle_rps: float = Field(default=1.0, gt=0)
     vre_passage_max_chars: int = Field(default=1500, ge=200)
+
+    # CONCEPT: shared-throttle (D-43). One rate per model tier, in requests a
+    # second, at 80% of the limit read from the provider's console before
+    # Phase 3 (ENV_AND_CONFIG.md, "Free-tier limits"): ministral-8b allows
+    # 3.13, ministral-14b 0.50. The other fifth is room for a live test at the
+    # same time, the Phase 5 citation checker, and clock differences. They
+    # replace VRE_THROTTLE_RPS, one rate for both tiers, which fitted neither.
+    vre_decision_rps: float = Field(default=2.5, gt=0)
+    vre_writer_rps: float = Field(default=0.4, gt=0)
+    # Requests to the model one run may send, retries included (D-41, D-43).
+    # A Phase 3 brief sends at most 14, or 28 if every call needed its schema
+    # retry; going over stops the run instead of letting a loop keep spending.
+    vre_max_model_calls_per_run: int = Field(default=30, ge=1, le=200)
 
     # Storage and services
     vre_data_dir: Path = Path("data")
