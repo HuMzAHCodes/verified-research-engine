@@ -1,6 +1,7 @@
 """The whole Phase 3 graph, end to end, with no network.
 
-CONCEPT: sequential-graph, tools-through-mcp, and from Phase 3 parallel-fan-out.
+CONCEPT: sequential-graph, tools-through-mcp, and from Phase 3 parallel-fan-out
+and shared-throttle (the run's call budget).
 build_graph is called exactly as in production, but with scripted models and
 FakeToolbox. A topic goes in and a draft comes out, and each part of the run can
 be checked: the plan, the branches, what was searched and read, the findings
@@ -17,10 +18,12 @@ from uuid import uuid4
 
 import pytest
 
+from graph.llm import MODEL_CALL_BUDGET_KEY, ModelCallBudget, ModelCallBudgetExceeded
 from graph.mcp_client import SearchHit, ToolCallError
 from graph.nodes.researcher import WebResearchFailed
 from graph.nodes.writer import WriterError
 from graph.supervisor import PHASE_TAG, build_graph, research_run_config
+from settings import settings
 from tests.conftest import FakeToolbox, ScriptedModel, search_hit, web_page
 
 TOPIC = "Due diligence on Symbotic"
@@ -314,3 +317,54 @@ def test_research_run_config_names_tags_and_identifies_the_run():
     assert run_config["run_id"] == run_id
     assert run_config["tags"] == [PHASE_TAG] == ["phase-3"]
     assert run_config["metadata"] == {"topic": TOPIC}
+
+
+def test_every_run_gets_a_fresh_budget_of_the_configured_size():
+    first_budget = research_run_config(TOPIC, uuid4())["configurable"][MODEL_CALL_BUDGET_KEY]
+    second_budget = research_run_config(TOPIC, uuid4())["configurable"][MODEL_CALL_BUDGET_KEY]
+
+    assert first_budget is not second_budget
+    assert first_budget.limit == settings.vre_max_model_calls_per_run
+    assert first_budget.requests_sent == 0
+
+
+def two_question_graph(make_gateway):
+    """Planner, two parallel branches, and a two-section writer: six requests."""
+    decision_model = ScriptedModel(
+        scripted_replies=[plan(FIRST_QUESTION, SECOND_QUESTION)],
+        replies_by_prompt_text={
+            FIRST_QUESTION: [{"found": True, "findings": [copied_from(1, "Robots.")]}],
+            SECOND_QUESTION: [{"found": True, "findings": [copied_from(2, "Retailers.")]}],
+        },
+    )
+    toolbox = FakeToolbox(
+        hits_by_query={FIRST_QUESTION: [search_hit(1)], SECOND_QUESTION: [search_hit(2)]},
+        pages_by_url={web_page(n).url: web_page(n) for n in (1, 2)},
+    )
+    writer_model = ScriptedModel(scripted_replies=one_section_per_question(2))
+    return build_graph(
+        make_gateway(decision_model=decision_model, writer_model=writer_model), toolbox
+    )
+
+
+async def test_parallel_branches_count_into_the_runs_one_budget(make_gateway):
+    run_config = research_run_config(TOPIC, uuid4())
+
+    await two_question_graph(make_gateway).ainvoke(
+        {"topic": TOPIC, "document_ids": []}, config=run_config
+    )
+
+    # Planner 1, P-02 2 (one per branch, sent at the same time), outline 1,
+    # sections 2: every request of the run, counted in one place.
+    assert run_config["configurable"][MODEL_CALL_BUDGET_KEY].requests_sent == 6
+
+
+async def test_a_run_that_uses_up_its_budget_stops(make_gateway):
+    run_config = research_run_config(TOPIC, uuid4())
+    # Room for the planner and both P-02 calls, not for the writer.
+    run_config["configurable"][MODEL_CALL_BUDGET_KEY] = ModelCallBudget(limit=3)
+
+    with pytest.raises(ModelCallBudgetExceeded, match="VRE_MAX_MODEL_CALLS_PER_RUN=3"):
+        await two_question_graph(make_gateway).ainvoke(
+            {"topic": TOPIC, "document_ids": []}, config=run_config
+        )
