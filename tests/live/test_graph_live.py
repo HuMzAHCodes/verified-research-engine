@@ -1,6 +1,7 @@
 """Live run of the whole Phase 3 graph: real planner, parallel researchers, writer.
 
-CONCEPT: sequential-graph, tools-through-mcp, and from Phase 3 parallel-fan-out.
+CONCEPT: sequential-graph, tools-through-mcp, and from Phase 3 parallel-fan-out
+and shared-throttle (per-tier rates, retries named by tier, the call budget).
 Runs only on request (`uv run pytest -m live`), with search-mcp running in its
 own terminal (D-32); skipped, with the start command, if it is not. One full
 run costs up to 6 Tavily searches and up to 14 model calls. Prints the brief
@@ -14,7 +15,7 @@ from uuid import uuid4
 
 import pytest
 
-from graph.llm import ModelGateway
+from graph.llm import MODEL_CALL_BUDGET_KEY, ModelGateway
 from graph.mcp_client import START_SERVER_COMMAND, McpToolbox
 from graph.supervisor import build_graph, research_run_config
 from settings import settings
@@ -40,11 +41,12 @@ async def test_the_graph_writes_a_brief_for_a_real_topic(caplog):
     finished_at_by_node: dict[str, float] = {}
     branch_finished_at: list[tuple[str, float]] = []
     final_state: dict = {}
+    run_config = research_run_config(LIVE_TOPIC, uuid4())
     async with McpToolbox.connect(settings.vre_search_mcp_url) as toolbox:
         graph = build_graph(ModelGateway(), toolbox)
         async for stream_mode, chunk in graph.astream(
             {"topic": LIVE_TOPIC, "document_ids": []},
-            config=research_run_config(LIVE_TOPIC, uuid4()),
+            config=run_config,
             stream_mode=["updates", "values"],
         ):
             if stream_mode == "values":
@@ -86,7 +88,19 @@ async def test_the_graph_writes_a_brief_for_a_real_topic(caplog):
     print(f"dropped by the checks: {dropped_by_reason or 'none'}")
     print(f"sections: {len(draft)}")
     print(f"schema retries: {sum('did not fit' in message for message in log_messages)}")
-    print(f"transient retries: {sum('transient error' in message for message in log_messages)}")
+    retry_messages = [message for message in log_messages if "transient error" in message]
+    decision_retries = sum("(decision," in message for message in retry_messages)
+    writer_retries = sum("(writer," in message for message in retry_messages)
+    print(
+        f"transient retries: {len(retry_messages)} "
+        f"(decision tier {decision_retries}, writer tier {writer_retries})"
+    )
+    call_budget = run_config["configurable"][MODEL_CALL_BUDGET_KEY]
+    print(f"model requests: {call_budget.requests_sent} of {call_budget.limit} allowed")
+    print(
+        f"rates: decision {settings.vre_decision_rps} a second, "
+        f"writer {settings.vre_writer_rps} a second"
+    )
     planner_seconds = finished_at_by_node["planner"]
     research_seconds = finished_at_by_node["research_check"] - planner_seconds
     writer_seconds = elapsed_seconds - finished_at_by_node["research_check"]
