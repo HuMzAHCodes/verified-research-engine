@@ -6,6 +6,10 @@ stops the program at start-up instead of failing later at the first API call.
 
 CONCEPT: mcp-client, decision 8. The search-mcp address has a working default,
 and a bad value stops the program at start-up with the variable's name.
+
+CONCEPT: shared-throttle. The rate per tier and the call budget have defaults
+taken from the measured limits, and values that would switch a limit off are
+refused at start-up.
 """
 
 import pytest
@@ -51,4 +55,30 @@ def test_a_remote_search_mcp_url_is_accepted(monkeypatch):
 def test_a_bad_search_mcp_url_stops_the_program(monkeypatch, bad_value, expected_message):
     monkeypatch.setenv("VRE_SEARCH_MCP_URL", bad_value)
     with pytest.raises(ValidationError, match=expected_message):
+        Settings(_env_file=None)
+
+
+def test_rates_and_budget_default_to_the_measured_limits(monkeypatch):
+    for variable in ("VRE_DECISION_RPS", "VRE_WRITER_RPS", "VRE_MAX_MODEL_CALLS_PER_RUN"):
+        monkeypatch.delenv(variable, raising=False)
+
+    defaults = Settings(_env_file=None)
+
+    # 80% of 3.13 and 0.50 requests a second (D-43).
+    assert (defaults.vre_decision_rps, defaults.vre_writer_rps) == (2.5, 0.4)
+    assert defaults.vre_max_model_calls_per_run == 30
+
+
+@pytest.mark.parametrize(
+    ("variable", "bad_value"),
+    [
+        ("VRE_DECISION_RPS", "0"),
+        ("VRE_WRITER_RPS", "-1"),
+        ("VRE_MAX_MODEL_CALLS_PER_RUN", "0"),
+        ("VRE_MAX_MODEL_CALLS_PER_RUN", "500"),
+    ],
+)
+def test_a_rate_or_budget_out_of_range_stops_the_program(monkeypatch, variable, bad_value):
+    monkeypatch.setenv(variable, bad_value)
+    with pytest.raises(ValidationError, match=variable.lower()):
         Settings(_env_file=None)
