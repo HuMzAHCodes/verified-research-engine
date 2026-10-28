@@ -69,9 +69,21 @@ ScriptedReply = dict[str, Any] | str | BaseException
 
 
 class ScriptedModel(BaseChatModel):
-    """A chat model that answers from a script instead of an API."""
+    """A chat model that answers from a script instead of an API.
+
+    Two kinds of script. scripted_replies are given out in call order, which
+    is right for calls made one after another. replies_by_prompt_text is for
+    calls made at the same time (parallel-fan-out): a reply goes to the call
+    whose prompt contains its key, typically a sub-question's text, whatever
+    order the calls arrive in.
+    """
 
     scripted_replies: list[ScriptedReply] = Field(default_factory=list)
+    # CONCEPT: parallel-fan-out. Parallel branches call the model at the same
+    # time, so which branch's call arrives first is not fixed. Replies in call
+    # order would then go to the wrong branch on some runs: a flaky test.
+    # Keying a reply to text in its prompt makes the script order-free.
+    replies_by_prompt_text: dict[str, list[ScriptedReply]] = Field(default_factory=dict)
     received_conversations: list[list[BaseMessage]] = Field(default_factory=list)
     bound_tool_name: str | None = None
 
@@ -100,15 +112,7 @@ class ScriptedModel(BaseChatModel):
         # Record first, so a test can read the prompt even when the reply is
         # an error.
         self.received_conversations.append(list(messages))
-        if not self.scripted_replies:
-            # Strict on purpose: an extra model call is a bug (a loop, or a
-            # cap not respected), not something to answer with a default.
-            raise AssertionError(
-                f"ScriptedModel ran out of replies after "
-                f"{len(self.received_conversations) - 1} calls"
-            )
-
-        next_reply = self.scripted_replies.pop(0)
+        next_reply = self.next_reply_for(messages)
         if isinstance(next_reply, BaseException):
             raise next_reply
         if isinstance(next_reply, str):
@@ -122,6 +126,29 @@ class ScriptedModel(BaseChatModel):
                 ],
             )
         return ChatResult(generations=[ChatGeneration(message=reply_message)])
+
+    def next_reply_for(self, messages: list[BaseMessage]) -> ScriptedReply:
+        """The keyed reply whose text is in the prompt, else the next in call order.
+
+        Strict on purpose: an extra model call is a bug (a loop, or a cap not
+        respected), and a prompt that matches two keys is a test that cannot
+        say which reply it meant; both fail the test instead of guessing.
+        """
+        prompt_text = "\n".join(str(message.content) for message in messages)
+        matching_keys = [key for key in self.replies_by_prompt_text if key in prompt_text]
+        if len(matching_keys) > 1:
+            raise AssertionError(f"ScriptedModel: the prompt matches several keys {matching_keys}")
+        if matching_keys:
+            keyed_replies = self.replies_by_prompt_text[matching_keys[0]]
+            if not keyed_replies:
+                raise AssertionError(f"ScriptedModel ran out of replies for {matching_keys[0]!r}")
+            return keyed_replies.pop(0)
+        if not self.scripted_replies:
+            raise AssertionError(
+                f"ScriptedModel ran out of replies after "
+                f"{len(self.received_conversations) - 1} calls"
+            )
+        return self.scripted_replies.pop(0)
 
 
 def http_error(status_code: int) -> httpx.HTTPStatusError:
