@@ -1,14 +1,19 @@
-"""Scripted tests of the researcher: search, read, extract, all through the toolbox.
+"""Scripted tests of one web_researcher branch, and of research_check.
 
 CONCEPT: tools-through-mcp. FakeToolbox plays search-mcp and ScriptedModel plays
 P-02, behind a real ModelGateway. The checks of verbatim extraction run for
 real, so a finding here exists only if its passage is on its page.
+
+CONCEPT: parallel-fan-out. From Phase 3 a branch researches one sub-question
+(it receives a WebResearchTask), and the D-40 check runs once after all
+branches, in research_check_node. Branches running together are tested in
+test_graph.py, through the whole graph.
 """
 
 import pytest
 
 from graph.mcp_client import SearchServerUnavailable, ToolCallError
-from graph.nodes.researcher import WebResearchFailed, researcher_node
+from graph.nodes.researcher import WebResearchFailed, research_check_node, web_researcher_node
 from graph.state import SubQuestion
 from tests.conftest import FakeToolbox, ScriptedModel, search_hit, web_page
 
@@ -26,37 +31,52 @@ def p02_reply(*findings: dict) -> dict:
     return {"found": bool(findings), "findings": list(findings)}
 
 
-async def run_researcher(make_gateway, toolbox, p02_replies, sub_questions):
+async def run_branch(make_gateway, toolbox, p02_replies, sub_question):
+    """Run one web_researcher branch, as one Send would start it."""
     extraction_model = ScriptedModel(scripted_replies=list(p02_replies))
-    researcher_update = await researcher_node(
-        {"sub_questions": sub_questions},
+    branch_update = await web_researcher_node(
+        {"sub_question": sub_question},
         gateway=make_gateway(decision_model=extraction_model),
         toolbox=toolbox,
     )
-    return researcher_update["findings"], extraction_model
+    return branch_update, extraction_model
 
 
 async def test_tc_res_02_every_search_and_read_goes_through_the_toolbox(make_gateway):
     toolbox = FakeToolbox(
+        hits_by_query={FIRST_QUESTION.text: [search_hit(1), search_hit(2)]},
+        pages_by_url={web_page(n).url: web_page(n) for n in (1, 2)},
+    )
+
+    branch_update, extraction_model = await run_branch(
+        make_gateway, toolbox, [p02_reply(copied_from(1), copied_from(2))], FIRST_QUESTION
+    )
+
+    assert toolbox.received_queries == [FIRST_QUESTION.text]
+    assert toolbox.received_urls == [search_hit(n).url for n in (1, 2)]
+    findings = branch_update["findings"]
+    assert [finding.id for finding in findings] == ["Q1-F1", "Q1-F2"]
+    assert all(finding.found and finding.answer for finding in findings)
+    assert branch_update["search_failures"] == []
+    assert extraction_model.scripted_replies == []  # one P-02 call for the sub-question
+
+
+async def test_a_branch_researches_only_its_own_sub_question(make_gateway):
+    # The toolbox could answer both questions; the branch asks only about Q2.
+    toolbox = FakeToolbox(
         hits_by_query={
-            FIRST_QUESTION.text: [search_hit(1), search_hit(2)],
+            FIRST_QUESTION.text: [search_hit(1)],
             SECOND_QUESTION.text: [search_hit(3)],
         },
-        pages_by_url={web_page(n).url: web_page(n) for n in (1, 2, 3)},
+        pages_by_url={web_page(n).url: web_page(n) for n in (1, 3)},
     )
 
-    findings, extraction_model = await run_researcher(
-        make_gateway,
-        toolbox,
-        [p02_reply(copied_from(1), copied_from(2)), p02_reply(copied_from(3))],
-        [FIRST_QUESTION, SECOND_QUESTION],
+    branch_update, _ = await run_branch(
+        make_gateway, toolbox, [p02_reply(copied_from(3))], SECOND_QUESTION
     )
 
-    assert toolbox.received_queries == [FIRST_QUESTION.text, SECOND_QUESTION.text]
-    assert toolbox.received_urls == [search_hit(n).url for n in (1, 2, 3)]
-    assert [finding.id for finding in findings] == ["Q1-F1", "Q1-F2", "Q2-F1"]
-    assert all(finding.found and finding.answer for finding in findings)
-    assert extraction_model.scripted_replies == []  # one P-02 call per sub-question
+    assert toolbox.received_queries == [SECOND_QUESTION.text]
+    assert [finding.id for finding in branch_update["findings"]] == ["Q2-F1"]
 
 
 async def test_unreadable_pages_are_skipped_and_rank_order_is_kept(make_gateway):
@@ -67,8 +87,8 @@ async def test_unreadable_pages_are_skipped_and_rank_order_is_kept(make_gateway)
         pages_by_url={web_page(n).url: web_page(n) for n in range(2, 6)},
     )
 
-    _, extraction_model = await run_researcher(
-        make_gateway, toolbox, [p02_reply(copied_from(2))], [FIRST_QUESTION]
+    _, extraction_model = await run_branch(
+        make_gateway, toolbox, [p02_reply(copied_from(2))], FIRST_QUESTION
     )
 
     assert len(toolbox.received_urls) == 5  # every hit was read
@@ -79,32 +99,28 @@ async def test_unreadable_pages_are_skipped_and_rank_order_is_kept(make_gateway)
     assert web_page(5).url not in p02_prompt.content
 
 
-async def test_a_failed_search_costs_only_its_own_sub_question(make_gateway):
+async def test_a_failed_search_gives_no_evidence_and_says_why(make_gateway):
     toolbox = FakeToolbox(
-        hits_by_query={
-            FIRST_QUESTION.text: ToolCallError("search failed upstream"),
-            SECOND_QUESTION.text: [search_hit(3)],
-        },
-        pages_by_url={web_page(3).url: web_page(3)},
+        hits_by_query={FIRST_QUESTION.text: ToolCallError("search failed upstream")}
     )
 
-    findings, _ = await run_researcher(
-        make_gateway, toolbox, [p02_reply(copied_from(3))], [FIRST_QUESTION, SECOND_QUESTION]
-    )
+    # ScriptedModel with no replies fails the test if P-02 is called.
+    branch_update, _ = await run_branch(make_gateway, toolbox, [], FIRST_QUESTION)
 
-    assert [(finding.id, finding.found) for finding in findings] == [
-        ("Q1-F1", False),
-        ("Q2-F1", True),
+    assert [(finding.id, finding.found) for finding in branch_update["findings"]] == [
+        ("Q1-F1", False)
     ]
+    assert branch_update["search_failures"] == ["Q1: search failed upstream"]
 
 
 async def test_no_readable_page_means_no_evidence_and_no_model_call(make_gateway):
     toolbox = FakeToolbox(hits_by_query={FIRST_QUESTION.text: [search_hit(1)]})  # no pages
 
     # ScriptedModel with no replies fails the test if P-02 is called.
-    findings, _ = await run_researcher(make_gateway, toolbox, [], [FIRST_QUESTION])
+    branch_update, _ = await run_branch(make_gateway, toolbox, [], FIRST_QUESTION)
 
-    assert [finding.found for finding in findings] == [False]
+    assert [finding.found for finding in branch_update["findings"]] == [False]
+    assert branch_update["search_failures"] == []  # the search worked; the pages did not
 
 
 async def test_a_dropped_passage_leaves_the_others(make_gateway):
@@ -114,13 +130,14 @@ async def test_a_dropped_passage_leaves_the_others(make_gateway):
     )
     paraphrased = {"url": web_page(1).url, "passage": "Page one mainly describes the text."}
 
-    findings, _ = await run_researcher(
+    branch_update, _ = await run_branch(
         make_gateway,
         toolbox,
         [p02_reply({**paraphrased, "answer": "A."}, copied_from(1))],
-        [FIRST_QUESTION],
+        FIRST_QUESTION,
     )
 
+    findings = branch_update["findings"]
     assert [finding.id for finding in findings] == ["Q1-F1"]
     assert findings[0].passage == "Main text of page 1."
 
@@ -137,16 +154,36 @@ async def test_a_server_that_is_gone_stops_the_run(make_gateway, where):
         )
 
     with pytest.raises(SearchServerUnavailable, match="stopped answering"):
-        await run_researcher(make_gateway, toolbox, [], [FIRST_QUESTION])
+        await run_branch(make_gateway, toolbox, [], FIRST_QUESTION)
 
 
-async def test_every_search_failing_stops_the_run_instead_of_an_empty_brief(make_gateway):
-    # D-40: a dead network fails every search. One failed search is skipped;
-    # all of them failing means there is nothing to write a brief from.
-    search_down = ToolCallError("search timed out after 15 s")
-    toolbox = FakeToolbox(
-        hits_by_query={FIRST_QUESTION.text: search_down, SECOND_QUESTION.text: search_down}
-    )
+def test_every_search_failing_stops_the_run_instead_of_an_empty_brief():
+    # D-40, now checked once after all branches (parallel-fan-out, decision 3).
+    # A dead network fails every search; there is nothing to write a brief from.
+    state = {
+        "sub_questions": [FIRST_QUESTION, SECOND_QUESTION],
+        "search_failures": [
+            "Q1: search timed out after 15 s",
+            "Q2: search timed out after 15 s",
+        ],
+    }
 
     with pytest.raises(WebResearchFailed, match=r"every web search failed \(2 of 2\)"):
-        await run_researcher(make_gateway, toolbox, [], [FIRST_QUESTION, SECOND_QUESTION])
+        research_check_node(state)
+
+
+def test_some_searches_failing_lets_the_run_go_on():
+    state = {
+        "sub_questions": [FIRST_QUESTION, SECOND_QUESTION],
+        "search_failures": ["Q1: search timed out after 15 s"],
+    }
+
+    assert research_check_node(state) == {}
+
+
+def test_no_web_sub_question_is_not_a_failure():
+    # Decision 7: with every sub-question routed to documents (possible from
+    # Phase 4) no search ran, so none failed.
+    document_question = SubQuestion(id="Q1", text="What does the report say?", route="document")
+
+    assert research_check_node({"sub_questions": [document_question]}) == {}
