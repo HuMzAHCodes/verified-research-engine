@@ -7,8 +7,12 @@ gateway's parsing, retries, and repair message all run in every test, while
 no request leaves the machine. FakeToolbox does the same for search-mcp; the
 phase 1 FakeSearchClient was removed with the direct search client (D-37).
 pytest loads this file automatically for every test under tests/.
+
+It also decides whether a test run sends traces to LangSmith (D-41): only a
+run that selects the live tests does. See pytest_configure below.
 """
 
+import os
 from typing import Any
 
 import httpx
@@ -21,6 +25,43 @@ from pydantic import Field
 
 from graph.llm import ModelGateway
 from graph.mcp_client import SearchHit, ToolCallError, WebPage
+
+
+def run_selects_live_tests(marker_expression: str) -> bool:
+    """True when the -m expression asks for the live tests.
+
+    "live" and "live and not slow" select them; "", "not live", and
+    "not (live)" do not. The expression is split into words, so a "live" that
+    directly follows "not" does not count.
+    """
+    words = marker_expression.replace("(", " ").replace(")", " ").split()
+    return any(
+        word == "live" and (position == 0 or words[position - 1] != "not")
+        for position, word in enumerate(words)
+    )
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Turn LangSmith tracing off unless this run selects the live tests.
+
+    CONCEPT: tracing-from-day-one, and the spending caps of D-41. settings.py
+    copies .env into the environment, and .env has LANGSMITH_TRACING=true, so
+    without this hook every scripted test on a developer's machine uploads its
+    fake model and tool calls: 66 traces for one run of the scripted tests,
+    measured against a counting server. On the free plan (5,000 traces a
+    month) that used most of the month's traces on runs that call no real
+    model. Live tests make real calls, so their traces are kept: they are the
+    ones worth opening when something fails.
+
+    pytest calls this hook once, after this file is imported and before any
+    test runs, so the variable is set before LangSmith first reads it.
+    Assigning os.environ directly also wins over the value load_dotenv copied
+    from .env. CI sets LANGSMITH_TRACING=false itself; this hook agrees with it.
+    """
+    marker_expression = config.getoption("markexpr") or ""
+    if not run_selects_live_tests(marker_expression):
+        os.environ["LANGSMITH_TRACING"] = "false"
+
 
 # One scripted reply: a dict becomes a tool call with those arguments, a str
 # becomes a plain-text answer with no tool call, an exception is raised.
