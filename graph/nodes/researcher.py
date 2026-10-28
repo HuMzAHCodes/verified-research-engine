@@ -1,7 +1,13 @@
-"""The researcher: checked web evidence for each sub-question, through MCP only.
+"""The web researcher: checked web evidence for one sub-question, through MCP only.
+
+CONCEPT: parallel-fan-out. From Phase 3 there is one web_researcher branch per
+web sub-question, all running at the same time (D-42). build_graph starts them
+with one Send each; a branch receives a WebResearchTask, one sub-question and
+nothing else, and returns only that sub-question's findings. The reducers on
+RunState append the branches' results in the order of the Send list.
 
 CONCEPT: tools-through-mcp. The graph reaches the web only through the toolbox
-(D-37). For each sub-question the researcher:
+(D-37). For its sub-question a branch:
 
 1. searches through the toolbox (search-mcp, never a search library),
 2. reads every result at the same time and keeps the first three readable
@@ -12,14 +18,13 @@ CONCEPT: tools-through-mcp. The graph reaches the web only through the toolbox
 Failures are split by kind (mcp-client, decision 6): a page or a search that
 fails is skipped and logged, and the sub-question can still end with a "no
 evidence" finding; SearchServerUnavailable is not caught, so a dead server
-stops the run instead of producing a brief with no evidence. The same rule
-covers a dead network (D-40): if every sub-question's search failed, the run
-stops with WebResearchFailed rather than writing a brief from nothing.
+stops the run, and LangGraph cancels the other branches at once. The D-40
+rule ("every search failed means the web cannot be reached") needs every
+branch's result, so it lives in research_check_node, which runs once after
+all branches (parallel-fan-out, decision 3).
 
 The toolbox and the gateway are injected by build_graph (D-25), so tests pass
-FakeToolbox and ScriptedModel. Phase 3 replaces this node with one
-web_researcher per sub-question, running in parallel; research_sub_question
-is the part that carries over unchanged.
+FakeToolbox and ScriptedModel.
 """
 
 import asyncio
@@ -31,12 +36,16 @@ from typing import Any
 from graph.extraction import extract_web_findings
 from graph.llm import ModelGateway
 from graph.mcp_client import SearchHit, Toolbox, ToolCallError, WebPage
-from graph.state import Finding, SubQuestion
+from graph.state import Finding, SubQuestion, WebResearchTask
 
 logger = logging.getLogger(__name__)
 
 SEARCH_RESULTS_PER_QUESTION = 5
 PAGES_PER_QUESTION = 3
+
+# Routes that send a sub-question to the web. "both" also goes to the document
+# researcher from Phase 4; "document" alone does not search the web.
+WEB_ROUTES = frozenset({"web", "both"})
 
 
 class WebResearchFailed(RuntimeError):
@@ -51,32 +60,46 @@ class SubQuestionResearch:
     search_error: str | None = None
 
 
-async def researcher_node(
-    state: Mapping[str, Any],
+async def web_researcher_node(
+    task: WebResearchTask,
     *,
     gateway: ModelGateway,
     toolbox: Toolbox,
-) -> dict[str, list[Finding]]:
-    """Research every sub-question in turn; Phase 3 runs them in parallel."""
-    sub_questions: list[SubQuestion] = state["sub_questions"]
-    new_findings: list[Finding] = []
-    failed_searches: list[str] = []
-    for sub_question in sub_questions:
-        research = await research_sub_question(sub_question, gateway, toolbox)
-        new_findings.extend(research.findings)
-        if research.search_error is not None:
-            failed_searches.append(f"{sub_question.id}: {research.search_error}")
+) -> dict[str, list[Any]]:
+    """Research one sub-question: one parallel branch.
 
-    # CONCEPT: tools-through-mcp, D-40. One failed search costs one
-    # sub-question. Every search failing means the web cannot be reached at
-    # all, and a brief written from no evidence must not look like a result.
-    if sub_questions and len(failed_searches) == len(sub_questions):
+    CONCEPT: parallel-fan-out, decision 2. The branch reuses the Phase 2 work
+    unchanged (research_sub_question). It returns only its own findings and,
+    if its search failed, one line saying why; the reducers append both.
+    """
+    sub_question = task["sub_question"]
+    research = await research_sub_question(sub_question, gateway, toolbox)
+    search_failures = (
+        [f"{sub_question.id}: {research.search_error}"] if research.search_error is not None else []
+    )
+    return {"findings": research.findings, "search_failures": search_failures}
+
+
+def research_check_node(state: Mapping[str, Any]) -> dict[str, Any]:
+    """Stop the run if every web search failed; otherwise change nothing.
+
+    CONCEPT: parallel-fan-out, decision 3, and D-40. One failed search costs
+    one sub-question. Every search failing means the web cannot be reached at
+    all, and a brief written from no evidence must not look like a result.
+    The node runs once, after every branch, so it is the first place that sees
+    all the searches. It makes no model call and no tool call.
+    """
+    web_question_count = sum(
+        1 for sub_question in state.get("sub_questions", []) if sub_question.route in WEB_ROUTES
+    )
+    search_failures: list[str] = state.get("search_failures", [])
+    # With no web sub-question there was no search to fail (decision 7).
+    if web_question_count and len(search_failures) == web_question_count:
         raise WebResearchFailed(
-            f"every web search failed ({len(failed_searches)} of {len(sub_questions)}); "
-            f"check the network and the search provider. Last error: {failed_searches[-1]}"
+            f"every web search failed ({len(search_failures)} of {web_question_count}); "
+            f"check the network and the search provider. Last error: {search_failures[-1]}"
         )
-    # Only the new findings: the reducer on RunState.findings appends them.
-    return {"findings": new_findings}
+    return {}
 
 
 async def research_sub_question(
