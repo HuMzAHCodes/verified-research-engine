@@ -29,6 +29,7 @@ FakeToolbox and ScriptedModel.
 
 import asyncio
 import logging
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -105,8 +106,14 @@ def research_check_node(state: Mapping[str, Any]) -> dict[str, Any]:
 async def research_sub_question(
     sub_question: SubQuestion, gateway: ModelGateway, toolbox: Toolbox
 ) -> SubQuestionResearch:
-    """Search, read, extract: the checked findings for one sub-question."""
+    """Search, read, extract: the checked findings for one sub-question.
+
+    CONCEPT: parallel-fan-out, measured. A branch takes as long as its search,
+    plus its slowest page read, plus its P-02 call; one log line gives the three
+    times, so a slow branch shows which part was slow.
+    """
     search_error: str | None = None
+    started_at = time.perf_counter()
     try:
         hits = await toolbox.search(sub_question.text, max_results=SEARCH_RESULTS_PER_QUESTION)
     except ToolCallError as error:
@@ -114,9 +121,20 @@ async def research_sub_question(
         logger.info("%s: search failed (%s)", sub_question.id, error)
         search_error = str(error)
         hits = []
+    searched_at = time.perf_counter()
     pages = await read_pages(sub_question, hits, toolbox)
+    read_at = time.perf_counter()
     # With no pages, extraction returns one found=False finding and makes no call.
     extraction = await extract_web_findings(gateway, sub_question, pages)
+    logger.info(
+        "%s: timing: search %.1f s, page reads %.1f s (%d of %d kept), extraction %.1f s",
+        sub_question.id,
+        searched_at - started_at,
+        read_at - searched_at,
+        len(pages),
+        len(hits),
+        time.perf_counter() - read_at,
+    )
     return SubQuestionResearch(findings=extraction.findings, search_error=search_error)
 
 
