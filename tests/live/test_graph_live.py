@@ -95,6 +95,32 @@ async def test_the_graph_writes_a_brief_for_a_real_topic(caplog):
         f"transient retries: {len(retry_messages)} "
         f"(decision tier {decision_retries}, writer tier {writer_retries})"
     )
+    # Why pages were skipped, by kind (the reasons come from search-mcp).
+    skip_reasons: dict[str, int] = {}
+    for message in log_messages:
+        if ": skipped " in message:
+            # "Q2: skipped <url> (<reason>)"; a url has no spaces, so the
+            # first " (" opens the reason, even one with brackets inside.
+            reason = message.split(" (", 1)[1]
+            kind = next(
+                (
+                    known
+                    for known in (
+                        "timed out",
+                        "HTTP",
+                        "not a text page",
+                        "no readable text",
+                        "could not fetch",
+                    )
+                    if reason.startswith(known)
+                ),
+                "other",
+            )
+            skip_reasons[kind] = skip_reasons.get(kind, 0) + 1
+    print(f"pages skipped by reason: {skip_reasons or 'none'}")
+    for message in log_messages:
+        if ": timing: " in message:
+            print(f"  {message}")
     call_budget = run_config["configurable"][MODEL_CALL_BUDGET_KEY]
     print(f"model requests: {call_budget.requests_sent} of {call_budget.limit} allowed")
     print(
