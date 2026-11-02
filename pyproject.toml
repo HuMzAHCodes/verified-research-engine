@@ -9,6 +9,7 @@ dependencies = [
     "langgraph>=1.2.15",
     "langsmith>=0.14.9",
     "pydantic-settings>=2.16.0",
+    "pypdf>=6.21.4",
     "python-dotenv>=1.2.4",
     "tavily-python>=0.8.5",
     "trafilatura>=2.3.1",
