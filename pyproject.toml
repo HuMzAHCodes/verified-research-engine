@@ -9,6 +9,7 @@ dependencies = [
     "langchain-mistralai>=1.1.6",
     "langgraph>=1.2.15",
     "langsmith>=0.14.9",
+    "numpy>=2.5.4",
     "pydantic-settings>=2.16.0",
     "pypdf>=6.21.4",
     "python-dotenv>=1.2.4",
