@@ -9,7 +9,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Copy the key=value lines from .env into the process environment before
@@ -22,6 +22,17 @@ load_dotenv()
 # Where search-mcp listens while developing: this machine only, started by hand
 # in its own terminal (D-32). Phase 11 points the variable at the deployed server.
 DEFAULT_SEARCH_MCP_URL = "http://127.0.0.1:8765/mcp"
+
+# Where pdf-parser-mcp listens while developing, beside search-mcp (D-46).
+# Ingestion reaches it only through this address, never by importing pypdf
+# (document-ingestion, decision 7).
+DEFAULT_PDF_PARSER_MCP_URL = "http://127.0.0.1:8766/mcp"
+
+# The default for each MCP address setting, used in its error messages.
+DEFAULT_MCP_URLS = {
+    "vre_search_mcp_url": DEFAULT_SEARCH_MCP_URL,
+    "vre_pdf_parser_mcp_url": DEFAULT_PDF_PARSER_MCP_URL,
+}
 
 
 class Settings(BaseSettings):
@@ -73,9 +84,20 @@ class Settings(BaseSettings):
     # retry; going over stops the run instead of letting a loop keep spending.
     vre_max_model_calls_per_run: int = Field(default=30, ge=1, le=200)
 
+    # CONCEPT: document-ingestion, decision 3 (D-48). The embedding model gets
+    # its own limiter, at 80% of its measured limit of 1 request a second, for
+    # the same reasons as the chat tiers above. Ingestion and a run's question
+    # embeddings share it, so together they stay under the account's limit.
+    vre_embed_rps: float = Field(default=0.8, gt=0)
+    # Chunks sent in one embedding request (document-ingestion, choice B).
+    # 32 is about 34 requests for the annual report; the upper bound keeps one
+    # request well below any per-request size limit that has not been checked.
+    vre_embed_batch_size: int = Field(default=32, ge=1, le=128)
+
     # Storage and services
     vre_data_dir: Path = Path("data")
     vre_search_mcp_url: str = DEFAULT_SEARCH_MCP_URL
+    vre_pdf_parser_mcp_url: str = DEFAULT_PDF_PARSER_MCP_URL
     vre_price_per_million_tokens: float = Field(default=0.0, ge=0)
 
     @field_validator("mistral_api_key", "tavily_api_key", "langsmith_api_key")
@@ -91,27 +113,28 @@ class Settings(BaseSettings):
             raise ValueError("is empty; set it in .env")
         return api_key
 
-    @field_validator("vre_search_mcp_url")
+    @field_validator("vre_search_mcp_url", "vre_pdf_parser_mcp_url")
     @classmethod
-    def require_http_address(cls, server_url: str) -> str:
-        """Check the search-mcp address at start-up, not at the first tool call.
+    def require_http_address(cls, server_url: str, field_info: ValidationInfo) -> str:
+        """Check an MCP server address at start-up, not at the first tool call.
 
-        CONCEPT: mcp-client, decision 8. The value used to mean "empty runs the
-        server locally"; with HTTP on localhost (D-32) there is no such mode, so
-        an empty value is a mistake, most likely a line left over from an older
-        .env. A missing scheme ("127.0.0.1:8765/mcp") is the other common typo.
+        CONCEPT: mcp-client, decision 8. The search-mcp value used to mean
+        "empty runs the server locally"; with HTTP on localhost (D-32) there is
+        no such mode, so an empty value is a mistake, most likely a line left
+        over from an older .env. A missing scheme ("127.0.0.1:8765/mcp") is the
+        other common typo. pdf-parser-mcp runs the same way (D-46), so its
+        address gets the same check; each message names that setting's default.
         """
+        default_url = DEFAULT_MCP_URLS[field_info.field_name]
         server_url = server_url.strip()
         if not server_url:
             raise ValueError(
-                f"is empty; delete the line from .env to use {DEFAULT_SEARCH_MCP_URL}, "
+                f"is empty; delete the line from .env to use {default_url}, "
                 "or set the server's address"
             )
         parts = urlsplit(server_url)
         if parts.scheme not in ("http", "https") or not parts.netloc:
-            raise ValueError(
-                f"must be an http:// or https:// address, such as {DEFAULT_SEARCH_MCP_URL}"
-            )
+            raise ValueError(f"must be an http:// or https:// address, such as {default_url}")
         return server_url
 
     @property
