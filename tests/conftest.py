@@ -1,4 +1,4 @@
-"""Shared test helpers: a scripted chat model, a gateway around it, fake tools.
+"""Shared test helpers: scripted chat and embedding models, a gateway around them, fake tools.
 
 CONCEPT: scripted-model-testing. Tests replace the model, never the code that
 calls it. ScriptedModel returns replies written in advance, in order, and
@@ -6,17 +6,20 @@ records every conversation it was sent. A real ModelGateway wraps it, so the
 gateway's parsing, retries, and repair message all run in every test, while
 no request leaves the machine. FakeToolbox does the same for search-mcp; the
 phase 1 FakeSearchClient was removed with the direct search client (D-37).
+ScriptedEmbeddings stands in for mistral-embed (document-ingestion).
 pytest loads this file automatically for every test under tests/.
 
 It also decides whether a test run sends traces to LangSmith (D-41): only a
 run that selects the live tests does. See pytest_configure below.
 """
 
+import hashlib
 import os
 from typing import Any
 
 import httpx
 import pytest
+from langchain_core.embeddings import Embeddings
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
@@ -165,24 +168,79 @@ def rate_limit_error() -> httpx.HTTPStatusError:
     return http_error(429)
 
 
+# The length of a ScriptedEmbeddings vector. mistral-embed's are 1,024 long;
+# eight is enough for tests and keeps failure messages readable.
+SCRIPTED_VECTOR_DIMENSIONS = 8
+
+
+def scripted_vector(text: str) -> list[float]:
+    """A vector that depends only on the text: the same text, the same vector.
+
+    Built from the text's SHA-256, so tests can predict it without scripting
+    it, and different texts almost never share one.
+    """
+    digest = hashlib.sha256(text.encode("utf-8")).digest()
+    return [digest[position] / 255 for position in range(SCRIPTED_VECTOR_DIMENSIONS)]
+
+
+class ScriptedEmbeddings(Embeddings):
+    """An embedding model that answers without the network.
+
+    CONCEPT: scripted-model-testing, for the embed tier (document-ingestion).
+    Every request (one call of aembed_documents) is recorded as the batch it
+    received. A request first takes the next scripted failure, if any is left:
+    an exception is raised, None means "answer normally". Otherwise it returns
+    scripted_vector(text) for each text, or the vector given in
+    vectors_by_text, so search tests can place texts where they want.
+    """
+
+    def __init__(
+        self,
+        scripted_failures: list[Exception | None] | None = None,
+        vectors_by_text: dict[str, list[float]] | None = None,
+    ) -> None:
+        self.scripted_failures = list(scripted_failures or [])
+        self.vectors_by_text = vectors_by_text or {}
+        self.received_batches: list[list[str]] = []
+
+    async def aembed_documents(self, texts: list[str]) -> list[list[float]]:
+        self.received_batches.append(list(texts))
+        if self.scripted_failures:
+            scripted_failure = self.scripted_failures.pop(0)
+            if scripted_failure is not None:
+                raise scripted_failure
+        return [self.vectors_by_text.get(text) or scripted_vector(text) for text in texts]
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        raise AssertionError("the gateway embeds asynchronously; use aembed_documents")
+
+    def embed_query(self, text: str) -> list[float]:
+        raise AssertionError("the gateway embeds asynchronously; use aembed_documents")
+
+
 @pytest.fixture
 def make_gateway():
     """Build a real ModelGateway around scripted models.
 
     No throttle wait and no retry wait, so retry tests run in milliseconds.
     A tier the test does not script gets an empty ScriptedModel: a call to the
-    wrong tier fails loudly instead of reaching the real API.
+    wrong tier fails loudly instead of reaching the real API. The embed tier
+    always gets a ScriptedEmbeddings, so no test can embed over the network.
     """
 
     def build_gateway(
         decision_model: ScriptedModel | None = None,
         writer_model: ScriptedModel | None = None,
+        embedding_model: ScriptedEmbeddings | None = None,
+        embed_batch_size: int | None = None,
     ) -> ModelGateway:
         return ModelGateway(
             decision_model=decision_model or ScriptedModel(),
             writer_model=writer_model or ScriptedModel(),
             requests_per_second=1000,
             retry_wait_seconds=0,
+            embedding_model=embedding_model or ScriptedEmbeddings(),
+            embed_batch_size=embed_batch_size,
         )
 
     return build_gateway
