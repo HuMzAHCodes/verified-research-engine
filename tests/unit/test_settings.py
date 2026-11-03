@@ -10,12 +10,16 @@ and a bad value stops the program at start-up with the variable's name.
 CONCEPT: shared-throttle. The rate per tier and the call budget have defaults
 taken from the measured limits, and values that would switch a limit off are
 refused at start-up.
+
+CONCEPT: document-ingestion. The embedding rate and batch size have their
+agreed defaults (D-48), and the pdf-parser-mcp address is checked like the
+search-mcp one.
 """
 
 import pytest
 from pydantic import ValidationError
 
-from settings import DEFAULT_SEARCH_MCP_URL, Settings, settings
+from settings import DEFAULT_PDF_PARSER_MCP_URL, DEFAULT_SEARCH_MCP_URL, Settings, settings
 
 
 def test_api_keys_are_hidden_when_settings_are_printed():
@@ -79,6 +83,52 @@ def test_rates_and_budget_default_to_the_measured_limits(monkeypatch):
     ],
 )
 def test_a_rate_or_budget_out_of_range_stops_the_program(monkeypatch, variable, bad_value):
+    monkeypatch.setenv(variable, bad_value)
+    with pytest.raises(ValidationError, match=variable.lower()):
+        Settings(_env_file=None)
+
+
+def test_pdf_parser_mcp_url_defaults_to_the_local_server(monkeypatch):
+    monkeypatch.delenv("VRE_PDF_PARSER_MCP_URL", raising=False)
+    assert Settings(_env_file=None).vre_pdf_parser_mcp_url == DEFAULT_PDF_PARSER_MCP_URL
+
+
+@pytest.mark.parametrize(
+    ("bad_value", "expected_message"),
+    [
+        ("", "is empty"),
+        ("127.0.0.1:8766/mcp", "http:// or https://"),
+    ],
+)
+def test_a_bad_pdf_parser_mcp_url_stops_the_program(monkeypatch, bad_value, expected_message):
+    monkeypatch.setenv("VRE_PDF_PARSER_MCP_URL", bad_value)
+    with pytest.raises(ValidationError, match=expected_message) as raised:
+        Settings(_env_file=None)
+    # The message names this setting's own default, not search-mcp's.
+    assert DEFAULT_PDF_PARSER_MCP_URL in str(raised.value)
+    assert "vre_pdf_parser_mcp_url" in str(raised.value)
+
+
+def test_embedding_rate_and_batch_size_default_to_the_agreed_values(monkeypatch):
+    for variable in ("VRE_EMBED_RPS", "VRE_EMBED_BATCH_SIZE"):
+        monkeypatch.delenv(variable, raising=False)
+
+    defaults = Settings(_env_file=None)
+
+    # 80% of mistral-embed's 1 request a second; 32 chunks a request (D-48).
+    assert defaults.vre_embed_rps == 0.8
+    assert defaults.vre_embed_batch_size == 32
+
+
+@pytest.mark.parametrize(
+    ("variable", "bad_value"),
+    [
+        ("VRE_EMBED_RPS", "0"),
+        ("VRE_EMBED_BATCH_SIZE", "0"),
+        ("VRE_EMBED_BATCH_SIZE", "500"),
+    ],
+)
+def test_an_embedding_setting_out_of_range_stops_the_program(monkeypatch, variable, bad_value):
     monkeypatch.setenv(variable, bad_value)
     with pytest.raises(ValidationError, match=variable.lower()):
         Settings(_env_file=None)
