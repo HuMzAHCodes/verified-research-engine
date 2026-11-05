@@ -20,6 +20,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "hypothesis>=6.170.14",
     "ipykernel>=7.4.0",
     "nbconvert>=7.17.2",
     "nbstripout>=0.9.1",
