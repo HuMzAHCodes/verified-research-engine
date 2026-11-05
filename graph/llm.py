@@ -65,6 +65,10 @@ REQUEST_TIMEOUT_SECONDS = 60
 MAX_RETRY_WAIT_SECONDS = 30.0
 # Where a run keeps its ModelCallBudget in its config (shared-throttle, choice C).
 MODEL_CALL_BUDGET_KEY = "model_call_budget"
+# Embedding batches that may wait for their replies at the same time (D-49).
+# One reply takes about 2.5 s and the limiter releases a request every 1.25 s,
+# so two in flight keep up with it; the third is room for a slow reply.
+EMBED_REQUESTS_IN_FLIGHT = 3
 
 
 class ModelCallError(RuntimeError):
@@ -370,45 +374,73 @@ class ModelGateway:
         """Embed texts with mistral-embed and return one vector per text, in order.
 
         CONCEPT: document-ingestion, decision 3 and choice B. The texts are
-        sent VRE_EMBED_BATCH_SIZE at a time, one request per batch, one batch
-        after another, each through the embedding model's limiter, the
-        transport retry, and the run's budget when there is one. prompt_id
-        names the caller in logs, errors, and traces, as for chat calls
-        ("INGEST:<document_id>", for example). A failure after the retries
-        raises ModelCallError, and no vectors are returned at all: the caller
-        never sees some of a document's vectors (decision 4).
-        """
-        vectors: list[list[float]] = []
-        for batch_start in range(0, len(texts), self.embed_batch_size):
-            batch = texts[batch_start : batch_start + self.embed_batch_size]
+        sent VRE_EMBED_BATCH_SIZE at a time, one request per batch, each
+        through the embedding model's limiter, the transport retry, and the
+        run's budget when there is one. prompt_id names the caller in logs,
+        errors, and traces, as for chat calls ("INGEST:<document_id>").
 
-            # Default arguments bind this batch now (see structured()).
-            async def send_batch(
-                batch_texts: list[str] = batch, first_chunk_index: int = batch_start
-            ) -> list[list[float]]:
+        CONCEPT: document-ingestion, D-49. Up to EMBED_REQUESTS_IN_FLIGHT
+        batches wait for their replies at the same time; the limiter still
+        releases requests at VRE_EMBED_RPS, so the rate is unchanged and only
+        the waiting overlaps. Sent one after another, each batch waited about
+        2.5 s for its reply: 101 s for the annual report's 35 requests, where
+        the limiter alone needs 44 s.
+
+        All or nothing (decision 4): if one batch fails after its retries, the
+        batches still in flight are cancelled, ModelCallError is raised, and
+        no vectors are returned at all.
+        """
+        batches = [
+            texts[batch_start : batch_start + self.embed_batch_size]
+            for batch_start in range(0, len(texts), self.embed_batch_size)
+        ]
+        vectors_by_batch: list[list[list[float]]] = [[] for _ in batches]
+        requests_in_flight = asyncio.Semaphore(EMBED_REQUESTS_IN_FLIGHT)
+        finished_batches = 0
+
+        async def embed_one_batch(batch_number: int, batch: list[str]) -> None:
+            nonlocal finished_batches
+
+            async def send_batch() -> list[list[float]]:
                 return await send_embedding_request(
                     self.embedding_model,
                     self.model_names_by_tier["embed"],
-                    batch_texts,
+                    batch,
                     langsmith_extra={
                         "name": prompt_id,
                         "tags": [prompt_id, "tier:embed"],
-                        "metadata": {
-                            "prompt_id": prompt_id,
-                            "first_chunk_index": first_chunk_index,
-                        },
+                        "metadata": {"prompt_id": prompt_id, "batch_number": batch_number + 1},
                     },
                 )
 
-            batch_vectors = await self._send_with_transport_retry(send_batch, prompt_id, "embed")
+            async with requests_in_flight:
+                batch_vectors = await self._send_with_transport_retry(
+                    send_batch, prompt_id, "embed"
+                )
             # A reply with the wrong number of vectors would shift every
             # later chunk onto another chunk's vector; stop instead.
             if len(batch_vectors) != len(batch):
                 raise ModelCallError(
                     f"{prompt_id}: asked for {len(batch)} vectors, got {len(batch_vectors)}"
                 )
-            vectors.extend(batch_vectors)
-        return vectors
+            # Kept by position, so replies that finish out of order still
+            # come back in the order of the texts.
+            vectors_by_batch[batch_number] = batch_vectors
+            finished_batches += 1
+            # A long ingestion shows it is moving (D-49): the annual report's
+            # first live run was stopped by hand because it printed nothing.
+            logger.info("%s: embedded batch %d of %d", prompt_id, finished_batches, len(batches))
+
+        try:
+            # A TaskGroup cancels every other task as soon as one fails.
+            async with asyncio.TaskGroup() as task_group:
+                for batch_number, batch in enumerate(batches):
+                    task_group.create_task(embed_one_batch(batch_number, batch))
+        except ExceptionGroup as failed_batches:
+            # Callers expect the failure itself (ModelCallError), not a group;
+            # it keeps its own cause (the HTTP error behind it).
+            raise failed_batches.exceptions[0]  # noqa: B904
+        return [vector for batch_vectors in vectors_by_batch for vector in batch_vectors]
 
     async def _send_with_transport_retry(
         self,
