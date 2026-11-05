@@ -18,6 +18,7 @@ from app.ingestion import (
     IngestionError,
     IngestionService,
     ScannedPdfRefused,
+    build_chunks,
     file_fingerprint,
 )
 from graph.document_store import DocumentStore
@@ -128,10 +129,11 @@ async def test_tc_doc_06_an_embedding_failure_stores_nothing_and_names_the_docum
     monkeypatch.setattr(graph.llm, "wait_before_retry", no_wait)
     pdf_path = write_upload(uploads_folder, "report.pdf", b"%PDF- report bytes")
     pages_by_path[str(pdf_path)] = REPORT_PAGES
-    # The first batch is embedded; the second fails on all three attempts.
-    embedding_model = ScriptedEmbeddings(
-        scripted_failures=[None, http_error(503), http_error(503), http_error(503)]
-    )
+    # The batch holding the sixth chunk (the second batch of four) fails on
+    # every attempt; the other batches are embedded. Tied to a chunk's text,
+    # not to arrival order, because batches run in parallel (D-49).
+    sixth_chunk_text = build_chunks("any-id", REPORT_PAGES)[5].text
+    embedding_model = ScriptedEmbeddings(failures_by_text={sixth_chunk_text: http_error(503)})
 
     with pytest.raises(
         IngestionError, match="report.pdf: ingestion stopped and nothing was stored"
