@@ -188,8 +188,12 @@ class ScriptedEmbeddings(Embeddings):
 
     CONCEPT: scripted-model-testing, for the embed tier (document-ingestion).
     Every request (one call of aembed_documents) is recorded as the batch it
-    received. A request first takes the next scripted failure, if any is left:
-    an exception is raised, None means "answer normally". Otherwise it returns
+    received. A batch holding a text in failures_by_text raises that text's
+    exception on every attempt: a permanent failure tied to one batch, which
+    stays the same whichever order parallel batches arrive in (D-49).
+    Otherwise a request takes the next scripted failure, if any is left: an
+    exception is raised, None means "answer normally"; this list is taken in
+    arrival order, so use it for a single batch. Otherwise it returns
     scripted_vector(text) for each text, or the vector given in
     vectors_by_text, so search tests can place texts where they want.
     """
@@ -198,13 +202,18 @@ class ScriptedEmbeddings(Embeddings):
         self,
         scripted_failures: list[Exception | None] | None = None,
         vectors_by_text: dict[str, list[float]] | None = None,
+        failures_by_text: dict[str, Exception] | None = None,
     ) -> None:
         self.scripted_failures = list(scripted_failures or [])
         self.vectors_by_text = vectors_by_text or {}
+        self.failures_by_text = failures_by_text or {}
         self.received_batches: list[list[str]] = []
 
     async def aembed_documents(self, texts: list[str]) -> list[list[float]]:
         self.received_batches.append(list(texts))
+        for text in texts:
+            if text in self.failures_by_text:
+                raise self.failures_by_text[text]
         if self.scripted_failures:
             scripted_failure = self.scripted_failures.pop(0)
             if scripted_failure is not None:
