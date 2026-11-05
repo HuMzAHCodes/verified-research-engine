@@ -1,13 +1,19 @@
 """Scripted tests of the gateway's embed tier: batching, retries, budget, no network.
 
 CONCEPT: document-ingestion, decision 3 and choice B (D-48). gateway.embed()
-sends VRE_EMBED_BATCH_SIZE texts per request, one request after another,
-through the embedding model's own limiter, the same transport retry as chat
-calls, and the run's budget. A failure after the retries returns no vectors
-at all (decision 4). The real embeddings client is built so that it never
-retries or re-splits a batch by itself ("What the experiment found").
+sends VRE_EMBED_BATCH_SIZE texts per request through the embedding model's own
+limiter, the same transport retry as chat calls, and the run's budget. A
+failure after the retries returns no vectors at all (decision 4). The real
+embeddings client is built so that it never retries or re-splits a batch by
+itself ("What the experiment found").
+
+CONCEPT: document-ingestion, D-49. Up to three batches wait for their replies
+at once. Replies that finish out of order still come back in order, a batch
+that fails for good cancels the others, and progress is logged per batch.
+Tests of several batches never rely on which batch arrives first.
 """
 
+import asyncio
 import json
 import logging
 
@@ -17,6 +23,7 @@ from langchain_core.runnables import RunnableLambda
 
 import graph.llm
 from graph.llm import (
+    EMBED_REQUESTS_IN_FLIGHT,
     MODEL_CALL_BUDGET_KEY,
     ModelCallBudget,
     ModelCallBudgetExceeded,
@@ -56,8 +63,8 @@ async def test_texts_are_sent_one_batch_per_request_and_come_back_in_order(make_
 
     vectors = await gateway.embed(texts, prompt_id=PROMPT_ID)
 
-    # 70 chunks at 32 a request: 32, 32, then the 6 left over.
-    assert [len(batch) for batch in embedding_model.received_batches] == [32, 32, 6]
+    # 70 chunks at 32 a request: 32, 32, and the 6 left over, in any order.
+    assert sorted(len(batch) for batch in embedding_model.received_batches) == [6, 32, 32]
     # Every vector belongs to the chunk at the same position.
     assert vectors == [scripted_vector(text) for text in texts]
 
@@ -91,18 +98,18 @@ async def test_tc_doc_06_failure_after_the_retries_returns_no_vectors(
     make_gateway, recorded_waits, caplog
 ):
     caplog.set_level(logging.WARNING)
-    # The first batch succeeds; the second fails three times.
-    embedding_model = ScriptedEmbeddings(
-        scripted_failures=[None, http_error(503), http_error(503), http_error(503)]
-    )
+    texts = chunk_texts(4)
+    # The second batch (texts 2 and 3) fails on every attempt; the first succeeds.
+    embedding_model = ScriptedEmbeddings(failures_by_text={texts[2]: http_error(503)})
     gateway = make_gateway(embedding_model=embedding_model, embed_batch_size=2)
 
     with pytest.raises(ModelCallError, match=f"{PROMPT_ID}: failed after 3 attempts"):
-        await gateway.embed(chunk_texts(4), prompt_id=PROMPT_ID)
+        await gateway.embed(texts, prompt_id=PROMPT_ID)
 
     # Nothing was returned, so the first batch's vectors cannot be stored on
     # their own: the caller gets all of a document's vectors or none.
-    assert len(embedding_model.received_batches) == 4
+    assert embedding_model.received_batches.count(texts[:2]) == 1
+    assert embedding_model.received_batches.count(texts[2:]) == 3
     # Each retry names the embed tier and its model (shared-throttle, decision 4).
     assert f"{PROMPT_ID} (embed, {settings.vre_embed_model}): transient error" in caplog.text
 
@@ -220,3 +227,91 @@ def test_a_trace_shows_the_texts_and_vector_counts_not_the_vectors():
 
     assert traced_inputs == {"model": "mistral-embed", "texts": ["a", "b"]}
     assert traced_outputs == {"vector_count": 32, "dimensions": 1024}
+
+
+# --- D-49: batches in flight ---------------------------------------------
+
+
+class SlowEmbeddings(ScriptedEmbeddings):
+    """Answers each batch after a delay, and records how many wait at once."""
+
+    def __init__(
+        self,
+        delay_seconds_by_first_text: dict[str, float],
+        default_delay_seconds: float = 0.05,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.delay_seconds_by_first_text = delay_seconds_by_first_text
+        self.default_delay_seconds = default_delay_seconds
+        self.batches_waiting = 0
+        self.most_batches_waiting = 0
+        self.completed_batches: list[list[str]] = []
+
+    async def aembed_documents(self, texts: list[str]) -> list[list[float]]:
+        self.batches_waiting += 1
+        self.most_batches_waiting = max(self.most_batches_waiting, self.batches_waiting)
+        try:
+            await asyncio.sleep(
+                self.delay_seconds_by_first_text.get(texts[0], self.default_delay_seconds)
+            )
+            vectors = await super().aembed_documents(texts)
+            self.completed_batches.append(list(texts))
+            return vectors
+        finally:
+            self.batches_waiting -= 1
+
+
+async def test_replies_that_finish_out_of_order_come_back_in_order(make_gateway):
+    texts = chunk_texts(6)
+    # The first batch is the slowest, the last the fastest.
+    embedding_model = SlowEmbeddings(
+        delay_seconds_by_first_text={texts[0]: 0.3, texts[2]: 0.15, texts[4]: 0.0}
+    )
+    gateway = make_gateway(embedding_model=embedding_model, embed_batch_size=2)
+
+    vectors = await gateway.embed(texts, prompt_id=PROMPT_ID)
+
+    assert embedding_model.completed_batches[0] == texts[4:]  # finished first
+    assert vectors == [scripted_vector(text) for text in texts]  # still in order
+
+
+async def test_no_more_than_three_batches_wait_at_once(make_gateway):
+    # Each reply takes 0.5 s, far longer than the test limiter's polling
+    # (0.1 s): with 0.05 s, a batch could finish before the third one was
+    # released, and the test failed now and then in the full suite (What broke).
+    embedding_model = SlowEmbeddings(delay_seconds_by_first_text={}, default_delay_seconds=0.5)
+    gateway = make_gateway(embedding_model=embedding_model, embed_batch_size=1)
+
+    await gateway.embed(chunk_texts(5), prompt_id=PROMPT_ID)
+
+    assert EMBED_REQUESTS_IN_FLIGHT == 3
+    assert embedding_model.most_batches_waiting == EMBED_REQUESTS_IN_FLIGHT
+
+
+async def test_a_batch_that_fails_for_good_cancels_the_batches_in_flight(make_gateway):
+    texts = chunk_texts(3)
+    # Batch 1 fails at once (a bad key is not retried); batches 2 and 3 are slow.
+    embedding_model = SlowEmbeddings(
+        delay_seconds_by_first_text={texts[0]: 0.0, texts[1]: 2.0, texts[2]: 2.0},
+        failures_by_text={texts[0]: http_error(401)},
+    )
+    gateway = make_gateway(embedding_model=embedding_model, embed_batch_size=1)
+    started_at = asyncio.get_running_loop().time()
+
+    with pytest.raises(ModelCallError, match="401"):
+        await gateway.embed(texts, prompt_id=PROMPT_ID)
+
+    # The slow batches were cancelled, not waited for.
+    assert asyncio.get_running_loop().time() - started_at < 1.0
+    assert embedding_model.completed_batches == []
+
+
+async def test_progress_is_logged_for_every_batch(make_gateway, caplog):
+    caplog.set_level(logging.INFO, logger="graph.llm")
+    gateway = make_gateway(embed_batch_size=2)
+
+    await gateway.embed(chunk_texts(6), prompt_id=PROMPT_ID)
+
+    for finished_batches in (1, 2, 3):
+        assert f"{PROMPT_ID}: embedded batch {finished_batches} of 3" in caplog.text
