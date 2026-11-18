@@ -17,6 +17,8 @@ the state models in graph/state.py. Ids are never part of a schema; code
 assigns them (PROMPTS.md, rule G-5).
 """
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from graph.state import Route
@@ -117,5 +119,90 @@ class SectionDraft(BaseModel):
         description=(
             "The section text. Every sentence that states a fact ends with the id "
             "of its finding in square brackets, for example [Q2-F1]."
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
+# P-10 to P-15: the Self-RAG subgraph (decision tier, D-51)
+#
+# CONCEPT: self-rag. One schema per call. As above, docstrings and Field
+# descriptions are sent to the model; developer notes are # comments. Chunk
+# labels (C1 to C6) are given in the prompt and are the only ids the model
+# writes; the code maps them back to chunks and drops any it did not give.
+# ---------------------------------------------------------------------------
+
+
+class SearchQuery(BaseModel):
+    """A search query for finding the answer in the uploaded documents."""
+
+    query: str = Field(
+        description=(
+            "6 to 16 words: the names and numbers from the question, plus words "
+            "the documents are likely to use. Not a question, and not an answer."
+        )
+    )
+
+
+class RelevantChunks(BaseModel):
+    """Which of the given chunks are about the question's topic."""
+
+    relevant_labels: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The labels, for example C2, of every chunk about the same company, "
+            "subject, or topic as the question. Empty if none is."
+        ),
+    )
+
+
+class DraftAnswer(BaseModel):
+    """An answer to the question, written only from the given chunks."""
+
+    answer: str = Field(
+        description="One to four sentences answering the question from the chunks only."
+    )
+
+
+class SupportCheck(BaseModel):
+    """Whether every claim in the answer is stated in the chunks."""
+
+    # Evidence comes before the verdict, so the model looks for the supporting
+    # text first and judges from what it found, as WebFinding puts the passage
+    # before the answer.
+    evidence: list[str] = Field(
+        default_factory=list,
+        description="Up to three short quotes from the chunks that support the answer.",
+    )
+    support: Literal["fully_supported", "partially_supported", "no_support"] = Field(
+        description=(
+            "fully_supported: every claim and every descriptive word is in the chunks. "
+            "partially_supported: the facts are there but the answer adds a word or "
+            "an interpretation that is not. no_support: the main claims are not there."
+        )
+    )
+
+
+class QuotedAnswer(BaseModel):
+    """The answer rewritten as direct quotes from the chunks, with nothing added."""
+
+    quotes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Sentences copied character for character from the chunks that answer "
+            "the question. Empty if no sentence does."
+        ),
+    )
+
+
+class UsefulnessCheck(BaseModel):
+    """Whether the answer gives what the question asks for."""
+
+    # The reason comes first, so the verdict follows from it.
+    reason: str = Field(description="One short line: what the answer gives, or what it lacks.")
+    usefulness: Literal["useful", "not_useful"] = Field(
+        description=(
+            "useful: it directly gives what the question asks for. not_useful: it is "
+            "about the topic but does not give the specific thing asked."
         )
     )
