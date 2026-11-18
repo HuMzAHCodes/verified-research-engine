@@ -15,13 +15,21 @@ both and merges their rankings:
 Both searches open only the documents asked for, so a run can never retrieve
 another run's chunks (TC-RES-10): the rule holds by what is loaded, for the
 keyword index as for the vector index.
+
+CONCEPT: self-rag, D-53. Measured on the annual report, a question as the
+planner writes it ("How much of Symbotic's revenue comes from Walmart?")
+puts the answer chunk 10th by meaning and 18th by keyword; reworded as
+search words ("Walmart share of total revenue largest customer") it is 1st
+in both. So the Self-RAG subgraph rewords every sub-question into a search
+query (P-15) before calling retrieve(); this module searches whatever query
+it is given.
 """
 
 import logging
 import re
 from dataclasses import dataclass
 
-from rank_bm25 import BM25L
+from rank_bm25 import BM25Plus
 
 from graph.document_store import DocumentStore, RetrievedChunk, StoredChunk
 from graph.llm import ModelGateway
@@ -88,8 +96,10 @@ def reciprocal_rank_fusion(
 class KeywordIndex:
     """BM25 over the chunks of one set of documents, in the same order as `chunks`."""
 
-    bm25: BM25L
+    bm25: BM25Plus
     chunks: list[StoredChunk]
+    # Each chunk's keyword words, to keep only chunks that hold a query word.
+    chunk_words: list[frozenset[str]]
 
 
 class HybridRetriever:
@@ -155,18 +165,24 @@ class HybridRetriever:
     def keyword_search(self, document_ids: list[str], query: str) -> list[RetrievedChunk]:
         """The chunks sharing words with the query, best BM25 score first.
 
-        Only chunks that contain at least one of the query's words are
-        returned (BM25L scores every other chunk 0), so a query with no
-        word in the documents gives an empty list and the merge falls back
-        to vector search alone.
+        Only chunks that hold at least one of the query's words are returned.
+        BM25Plus gives every chunk a small score, even one without any query
+        word, so the filter is by the words themselves, not by score > 0. A
+        query with no word in the documents gives an empty list, and the
+        merge then falls back to vector search alone.
         """
         query_tokens = keyword_tokens(query)
         if not query_tokens:
             return []
+        query_words = frozenset(query_tokens)
         keyword_index = self._keyword_index(document_ids)
         scores = keyword_index.bm25.get_scores(query_tokens)
         scored_positions = sorted(
-            (position for position, score in enumerate(scores) if score > 0),
+            (
+                position
+                for position, words in enumerate(keyword_index.chunk_words)
+                if query_words & words
+            ),
             key=lambda position: scores[position],
             reverse=True,
         )
@@ -184,12 +200,19 @@ class HybridRetriever:
         BM25 weighs a word by how rare it is among the chunks it searches,
         and scores from separate indexes would not be comparable.
 
-        BM25L, not the classic BM25Okapi: Okapi gives a word that occurs in
-        half or more of the chunks a weight of zero (or a small floor), so in
-        a short document, with few chunks, the very name a question asks about
-        could count for nothing. Tried on four chunks, two of them naming
-        "walmart": Okapi scored every chunk 0 for "walmart"; BM25L scored the
-        two chunks that contain it, and only those, above 0.
+        BM25Plus (D-53), chosen by measuring all three variants on the annual
+        report, after BM25L had been chosen on a four-chunk test:
+
+        - BM25L barely limits the reward for a repeated word: its top chunk
+          for the Walmart question said "Walmart" 10 times, and the answer
+          chunk, which says it twice, ranked 108th.
+        - BM25Okapi and BM25Plus limit it: the answer ranked 18th for the
+          question as asked and 1st for "Walmart share of total revenue
+          largest customer".
+        - Between those two, Okapi gives a word in half or more of the chunks
+          no weight, so in a short document the very name a question asks
+          about can count for nothing (on four chunks, two naming Walmart, it
+          scored every chunk 0). BM25Plus keeps every word's weight above 0.
         """
         index_key = tuple(sorted(document_ids))
         if index_key not in self._keyword_indexes:
@@ -197,5 +220,9 @@ class HybridRetriever:
                 chunk for document_id in index_key for chunk in self.store.chunks(document_id)
             ]
             tokenised_chunks = [keyword_tokens(chunk.text) for chunk in all_chunks]
-            self._keyword_indexes[index_key] = KeywordIndex(BM25L(tokenised_chunks), all_chunks)
+            self._keyword_indexes[index_key] = KeywordIndex(
+                bm25=BM25Plus(tokenised_chunks),
+                chunks=all_chunks,
+                chunk_words=[frozenset(words) for words in tokenised_chunks],
+            )
         return self._keyword_indexes[index_key]
