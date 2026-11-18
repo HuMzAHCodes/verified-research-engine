@@ -232,3 +232,18 @@ def test_a_damaged_document_is_reported_not_searched(store):
 
     with pytest.raises(DocumentStoreError, match="damaged"):
         DocumentStore(store.vectors_dir).search(["annual-report"], EAST, k=1)
+
+
+def test_chunks_returns_a_documents_chunks_in_index_order(store):
+    document, chunks = make_document("annual-report", ["east text", "north text", "up text"])
+    store.save(document, chunks, [EAST, NORTH, UP])
+
+    stored_chunks = store.chunks("annual-report")
+    # A copy: changing the list a caller got back cannot change the store.
+    stored_chunks.clear()
+
+    assert [chunk.text for chunk in store.chunks("annual-report")] == [
+        "east text",
+        "north text",
+        "up text",
+    ]
