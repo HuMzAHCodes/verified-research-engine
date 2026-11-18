@@ -208,6 +208,16 @@ class DocumentStore:
             logger.warning("removed an unfinished save: %s", leftover_dir.name)
         return removed_names
 
+    def chunks(self, document_id: str) -> list[StoredChunk]:
+        """Every chunk of a stored document, in index order.
+
+        CONCEPT: self-rag, choice A (D-52). The keyword index of hybrid
+        retrieval is built from these, in memory; the store keeps only what
+        it already stores. Read from disk the first time, like the index.
+        """
+        _, stored_chunks = self._load(document_id)
+        return list(stored_chunks)
+
     def search(
         self,
         document_ids: list[str],
