@@ -59,10 +59,19 @@ class Settings(BaseSettings):
     langsmith_tracing: bool = True
     langsmith_project: str = "vre-dev"
 
-    # Models. The decision prompts use the small model; the writer prompts use
-    # the larger one, which fills long, structured answers more reliably.
-    vre_chat_model: str = "ministral-8b-latest"
-    vre_writer_model: str = "ministral-14b-latest"
+    # Models. The decision prompts and the writer prompts each name a tier, so
+    # the two can run on different models (D-24). D-55: Mistral cut the Free
+    # plan's Ministral models (3b, 8b, 14b) and codestral to 2 requests a
+    # minute; Small and Magistral answered with a limit of 0, Large with "not
+    # available in your subscription tier". Of the chat models with function
+    # calling that this key can see, only Voxtral Small allows more: 60
+    # requests and 50,000 tokens a minute (Mistral's reply headers, read in
+    # Phase 4; the console's Limits page proved wrong). It is listed as an
+    # audio model but answers text and calls functions, and is built on
+    # Mistral Small (24B). Both tiers use it for now; pinned by its dated
+    # name, since the old "-latest" alias had silently moved to a new model.
+    vre_chat_model: str = "voxtral-small-2507"
+    vre_writer_model: str = "voxtral-small-2507"
     vre_embed_model: str = "mistral-embed"
 
     # Caps and limits. Field(ge=..., le=...) rejects out-of-range values at
@@ -71,14 +80,15 @@ class Settings(BaseSettings):
     vre_max_revisions: int = Field(default=3, ge=0, le=10)
     vre_passage_max_chars: int = Field(default=1500, ge=200)
 
-    # CONCEPT: shared-throttle (D-43). One rate per model tier, in requests a
-    # second, at 80% of the limit read from the provider's console before
-    # Phase 3 (ENV_AND_CONFIG.md, "Free-tier limits"): ministral-8b allows
-    # 3.13, ministral-14b 0.50. The other fifth is room for a live test at the
-    # same time, the Phase 5 citation checker, and clock differences. They
-    # replace VRE_THROTTLE_RPS, one rate for both tiers, which fitted neither.
-    vre_decision_rps: float = Field(default=2.5, gt=0)
-    vre_writer_rps: float = Field(default=0.4, gt=0)
+    # CONCEPT: shared-throttle (D-43, D-55). One rate per model tier, in
+    # requests a second, at 80% of the measured limit: Voxtral Small allows 60
+    # a minute, 1 a second, so 0.8. The other fifth is room for a live test at
+    # the same time, the Phase 5 citation checker, and clock differences. Both
+    # tiers name the same model, so they share its one limiter (the registry
+    # is keyed by model name), as the account's limit requires. D-43 set 2.5
+    # and 0.4 for the Ministral models it replaced.
+    vre_decision_rps: float = Field(default=0.8, gt=0)
+    vre_writer_rps: float = Field(default=0.8, gt=0)
     # Requests to the model one run may send, retries included (D-41, D-43).
     # A Phase 3 brief sends at most 14, or 28 if every call needed its schema
     # retry; going over stops the run instead of letting a loop keep spending.
