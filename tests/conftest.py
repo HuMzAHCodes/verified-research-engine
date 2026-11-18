@@ -231,7 +231,8 @@ class ScriptedEmbeddings(Embeddings):
 def make_gateway():
     """Build a real ModelGateway around scripted models.
 
-    No throttle wait and no retry wait, so retry tests run in milliseconds.
+    No throttle wait and no retry wait (neither the 2 s one nor the 20 s one
+    after a 429, D-55), so retry tests run in milliseconds.
     A tier the test does not script gets an empty ScriptedModel: a call to the
     wrong tier fails loudly instead of reaching the real API. The embed tier
     always gets a ScriptedEmbeddings, so no test can embed over the network.
@@ -250,6 +251,7 @@ def make_gateway():
             retry_wait_seconds=0,
             embedding_model=embedding_model or ScriptedEmbeddings(),
             embed_batch_size=embed_batch_size,
+            rate_limit_wait_seconds=0,
         )
 
     return build_gateway
