@@ -180,10 +180,10 @@ async def test_one_embedding_request_per_retrieval_and_none_without_documents(
     assert len(embedding_model.received_batches) == 1
 
 
-def test_bm25l_weighs_a_name_found_in_half_the_chunks_of_a_short_document(store, make_retriever):
-    # The reason BM25L is used, not BM25Okapi (see _keyword_index): in a
-    # four-chunk document where two chunks name Walmart, Okapi gives the word
-    # no weight, while BM25L scores exactly the two chunks that contain it.
+def test_a_name_in_half_the_chunks_of_a_short_document_still_counts(store, make_retriever):
+    # Why not BM25Okapi (D-53): in a four-chunk document where two chunks name
+    # Walmart, Okapi gives the word no weight. BM25Plus finds exactly the two
+    # chunks that contain it, and no chunk without it.
     save_document(
         store,
         "short-report",
@@ -199,3 +199,31 @@ def test_bm25l_weighs_a_name_found_in_half_the_chunks_of_a_short_document(store,
     found = retriever.keyword_search(["short-report"], "Walmart")
 
     assert {chunk.chunk_index for chunk in found} == {0, 3}
+
+
+def test_a_word_repeated_many_times_does_not_beat_a_chunk_matching_more_words(
+    store, make_retriever
+):
+    # Why not BM25L (D-53): on the annual report its top chunk said "Walmart"
+    # 10 times and the answer, saying it twice, ranked 108th. BM25Plus limits
+    # the reward for repetition, so the chunk that matches more of the
+    # query's words ranks first.
+    filler = [(f"Filler line {index} about warehouses and storage.", NORTH) for index in range(40)]
+    save_document(
+        store,
+        "annual-report",
+        [
+            ("Walmart " * 10 + "agreement to purchase systems.", NORTH),
+            ("Walmart, our largest customer, accounted for 85% of our total revenue.", NORTH),
+            *filler,
+        ],
+    )
+    retriever, _ = make_retriever({})
+
+    found = retriever.keyword_search(
+        ["annual-report"], "Walmart share of total revenue largest customer"
+    )
+
+    assert found[0].chunk_index == 1
+    # Chunks holding no query word are left out, though BM25Plus scores them.
+    assert all(chunk.chunk_index in (0, 1) for chunk in found)
