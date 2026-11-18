@@ -7,7 +7,8 @@ ModelGateway.structured(), which applies, in this order:
 2. the throttle              the limiter for the tier's model, shared by the
                              whole process (shared-throttle)
 3. the transport retry       429, 5xx, timeouts, dropped connections; 3 tries,
-                             waiting as the provider asks or with a random spread
+                             waiting as the provider asks or with a random spread;
+                             a 429 waits long enough to reach the next minute (D-55)
 4. the schema retry          a reply that does not fit the schema gets one
                              more try, with the validation error shown
 5. the trace tags            prompt id and version on every LangSmith run
@@ -45,8 +46,9 @@ from settings import settings
 
 logger = logging.getLogger(__name__)
 
-# Which model a prompt uses. Small decision schemas run on the 8b model; the
-# writer's long, structured answers run on the 14b model (D-24).
+# Which model a prompt uses. Small decision schemas run on the decision model;
+# the writer's long, structured answers run on the larger writer model (D-24;
+# the models themselves are set in settings.py, D-55).
 ModelTier = Literal["decision", "writer"]
 # Every tier with its own limiter: the two chat tiers and the embedding model.
 LimitedTier = Literal["decision", "writer", "embed"]
@@ -62,7 +64,17 @@ RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 REQUEST_TIMEOUT_SECONDS = 60
 # The longest wait before a retry, whatever a Retry-After header says, so a
 # wrong or very large value cannot stall a run (shared-throttle, choice B).
-MAX_RETRY_WAIT_SECONDS = 30.0
+# 60 s, one whole minute, since D-55: Mistral's limits are counted per minute.
+MAX_RETRY_WAIT_SECONDS = 60.0
+# The first wait after a 429 that names no wait (D-55). Mistral sends no
+# Retry-After, and its request and token limits are counted per minute, so
+# the D-43 waits of 2 s and 4 s all fell inside the minute that was already
+# used up (Phase 4, self-rag, step 4). 20 s, then 40 s, adds up to the whole
+# minute before the third and last attempt.
+RATE_LIMIT_WAIT_SECONDS = 20.0
+# The headers in which Mistral reports its limits and what is left of them
+# (x-ratelimit-limit-req-minute, x-ratelimit-remaining-tokens-minute, ...).
+RATE_LIMIT_HEADER_PREFIX = "x-ratelimit-"
 # Where a run keeps its ModelCallBudget in its config (shared-throttle, choice C).
 MODEL_CALL_BUDGET_KEY = "model_call_budget"
 # Embedding batches that may wait for their replies at the same time (D-49).
@@ -270,6 +282,7 @@ class ModelGateway:
         retry_wait_seconds: float = 2.0,
         embedding_model: Embeddings | None = None,
         embed_batch_size: int | None = None,
+        rate_limit_wait_seconds: float = RATE_LIMIT_WAIT_SECONDS,
     ) -> None:
         # Tests pass scripted models here; in normal use all three are built
         # from settings.
@@ -308,6 +321,7 @@ class ModelGateway:
                 "embed": shared_rate_limiter(settings.vre_embed_model, settings.vre_embed_rps),
             }
         self.retry_wait_seconds = retry_wait_seconds
+        self.rate_limit_wait_seconds = rate_limit_wait_seconds
 
     async def structured(
         self,
@@ -466,15 +480,24 @@ class ModelGateway:
             except Exception as error:
                 if not is_transient_error(error):
                     raise ModelCallError(f"{prompt_id}: {error}") from error
+                limits_reported = rate_limit_report(error)
                 if transport_attempt == TRANSPORT_ATTEMPTS:
                     raise ModelCallError(
-                        f"{prompt_id}: failed after {TRANSPORT_ATTEMPTS} attempts: {error}"
+                        f"{prompt_id}: failed after {TRANSPORT_ATTEMPTS} attempts: "
+                        f"{error}{limits_reported}"
                     ) from error
-                wait_seconds = retry_wait_seconds(error, transport_attempt, self.retry_wait_seconds)
+                wait_seconds = retry_wait_seconds(
+                    error,
+                    transport_attempt,
+                    self.retry_wait_seconds,
+                    self.rate_limit_wait_seconds,
+                )
                 # CONCEPT: shared-throttle, decision 4. The tier and the model
-                # are named, so a run's retries show which limit was reached.
+                # are named, so a run's retries show which limit was reached;
+                # since D-55 the provider's own limit headers are added, so a
+                # changed limit shows in the log without a diagnostic.
                 logger.warning(
-                    "%s (%s, %s): transient error (attempt %d of %d), retrying in %.1f s: %s",
+                    "%s (%s, %s): transient error (attempt %d of %d), retrying in %.1f s: %s%s",
                     prompt_id,
                     tier,
                     self.model_names_by_tier[tier],
@@ -482,24 +505,55 @@ class ModelGateway:
                     TRANSPORT_ATTEMPTS,
                     wait_seconds,
                     error,
+                    limits_reported,
                 )
                 await wait_before_retry(wait_seconds)
         raise AssertionError("unreachable")
 
 
-def retry_wait_seconds(error: BaseException, attempt: int, base_wait_seconds: float) -> float:
-    """How long to wait before the next attempt (shared-throttle, choice B).
+def is_rate_limit_error(error: BaseException) -> bool:
+    """True for a 429: the provider refused because a limit was reached."""
+    return isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 429
+
+
+def retry_wait_seconds(
+    error: BaseException,
+    attempt: int,
+    base_wait_seconds: float,
+    rate_limit_wait_seconds: float = RATE_LIMIT_WAIT_SECONDS,
+) -> float:
+    """How long to wait before the next attempt (shared-throttle, choice B; D-55).
 
     If the provider said how long to wait (Retry-After), wait that long. If not,
-    wait base, then twice base, each with up to half as much again added at
-    random, so branches refused together do not all come back together. Either
-    way, never more than MAX_RETRY_WAIT_SECONDS.
+    a 429 starts from rate_limit_wait_seconds (20 s), because the limit it hit
+    is counted per minute; any other transient failure (5xx, a timeout, a
+    dropped connection) starts from base_wait_seconds (2 s). Either start
+    doubles on the next attempt, with up to half as much again added at random,
+    so branches refused together do not all come back together. Never more
+    than MAX_RETRY_WAIT_SECONDS.
     """
     provider_wait = retry_after_seconds(error)
     if provider_wait is not None:
         return min(provider_wait, MAX_RETRY_WAIT_SECONDS)
-    growing_wait = base_wait_seconds * 2 ** (attempt - 1)
+    first_wait = rate_limit_wait_seconds if is_rate_limit_error(error) else base_wait_seconds
+    growing_wait = first_wait * 2 ** (attempt - 1)
     return min(growing_wait + random.uniform(0, growing_wait / 2), MAX_RETRY_WAIT_SECONDS)
+
+
+def rate_limit_report(error: BaseException) -> str:
+    """The provider's limit headers on a refused request, for the log (D-55).
+
+    For example " [limits: limit-req-minute=2, remaining-req-minute=0]". Empty
+    when the error has no response or the response has no such headers.
+    """
+    if not isinstance(error, httpx.HTTPStatusError):
+        return ""
+    reported_limits = [
+        f"{header_name.lower().removeprefix(RATE_LIMIT_HEADER_PREFIX)}={header_value}"
+        for header_name, header_value in sorted(error.response.headers.items())
+        if header_name.lower().startswith(RATE_LIMIT_HEADER_PREFIX)
+    ]
+    return f" [limits: {', '.join(reported_limits)}]" if reported_limits else ""
 
 
 def retry_after_seconds(error: BaseException) -> float | None:
