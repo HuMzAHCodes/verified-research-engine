@@ -68,9 +68,27 @@ def test_rates_and_budget_default_to_the_measured_limits(monkeypatch):
 
     defaults = Settings(_env_file=None)
 
-    # 80% of 3.13 and 0.50 requests a second (D-43).
-    assert (defaults.vre_decision_rps, defaults.vre_writer_rps) == (2.5, 0.4)
+    # 80% of the 1.00 request a second both models allow (D-43, D-55).
+    assert (defaults.vre_decision_rps, defaults.vre_writer_rps) == (0.8, 0.8)
     assert defaults.vre_max_model_calls_per_run == 30
+
+
+def test_models_default_to_the_one_measured_usable_model_pinned_by_date(monkeypatch):
+    for variable in ("VRE_CHAT_MODEL", "VRE_WRITER_MODEL"):
+        monkeypatch.delenv(variable, raising=False)
+
+    defaults = Settings(_env_file=None)
+
+    # D-55: the only chat model with function calling that answered at more
+    # than 2 requests a minute, by a dated name, never a "-latest" alias.
+    assert (defaults.vre_chat_model, defaults.vre_writer_model) == (
+        "voxtral-small-2507",
+        "voxtral-small-2507",
+    )
+    assert not any(
+        model_name.endswith("-latest")
+        for model_name in (defaults.vre_chat_model, defaults.vre_writer_model)
+    )
 
 
 @pytest.mark.parametrize(
