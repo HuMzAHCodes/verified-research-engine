@@ -4,8 +4,10 @@ CONCEPT: model-gateway, tested with scripted-model-testing. Each test scripts
 the model's replies and checks what the gateway returns, raises, and sends.
 
 CONCEPT: shared-throttle. TC-RES-05 (rate-limit responses): a 429 is retried
-after a growing, randomised wait or the wait the provider asks for, and gives
-up after three attempts. Each tier's model has its own limiter, shared by
+after a growing, randomised wait long enough to reach the next minute (D-55),
+or the wait the provider asks for, and gives up after three attempts; other
+transient failures keep the short waits. The provider's limit headers reach
+the log and the final error. Each tier's model has its own limiter, shared by
 every gateway in the process, and calls on a tier are spaced by its rate. A
 run's budget counts every request it sends, retries included.
 """
@@ -27,11 +29,13 @@ import graph.llm
 from graph.llm import (
     MAX_RETRY_WAIT_SECONDS,
     MODEL_CALL_BUDGET_KEY,
+    RATE_LIMIT_WAIT_SECONDS,
     ModelCallBudget,
     ModelCallBudgetExceeded,
     ModelCallError,
     ModelGateway,
     current_call_budget,
+    rate_limit_report,
     retry_after_seconds,
 )
 from settings import settings
@@ -139,17 +143,35 @@ def recorded_waits(monkeypatch) -> list[float]:
     return waits
 
 
+def rate_limit_with_limit_headers() -> httpx.HTTPStatusError:
+    """A 429 as Mistral sent it in Phase 4: no Retry-After, only its limit headers."""
+    request = httpx.Request("POST", "https://api.mistral.ai/v1/chat/completions")
+    response = httpx.Response(
+        429,
+        request=request,
+        headers={
+            "x-ratelimit-limit-req-minute": "2",
+            "x-ratelimit-remaining-req-minute": "0",
+            "content-type": "application/json",
+        },
+    )
+    return httpx.HTTPStatusError("Error response 429", request=request, response=response)
+
+
 def gateway_with_real_waits(planner_model: ScriptedModel) -> ModelGateway:
-    """Like make_gateway, but with the production base wait of 2 s."""
+    """Like make_gateway, but with the production waits: 2 s, and 20 s after a 429."""
     return ModelGateway(
         decision_model=planner_model,
         writer_model=ScriptedModel(),
         requests_per_second=1000,
         retry_wait_seconds=2.0,
+        rate_limit_wait_seconds=RATE_LIMIT_WAIT_SECONDS,
     )
 
 
-async def test_tc_res_05_a_rate_limit_is_retried_after_growing_waits(recorded_waits, caplog):
+async def test_tc_res_05_a_rate_limit_waits_long_enough_to_reach_the_next_minute(
+    recorded_waits, caplog
+):
     caplog.set_level(logging.WARNING)
     planner_model = ScriptedModel(
         scripted_replies=[rate_limit_error(), rate_limit_error(), VALID_PLAN]
@@ -159,11 +181,44 @@ async def test_tc_res_05_a_rate_limit_is_retried_after_growing_waits(recorded_wa
 
     assert planner_output.sub_questions[0].route == "web"
     first_wait, second_wait = recorded_waits
-    # 2 s, then 4 s, each with up to half as much again added at random.
-    assert 2.0 <= first_wait <= 3.0
-    assert 4.0 <= second_wait <= 6.0
+    # D-55: 20 s, then 40 s, each with up to half as much again added at
+    # random (the second capped at 60 s). Together at least a whole minute,
+    # so the last attempt falls in a new minute; 2 s and 4 s never did.
+    assert 20.0 <= first_wait <= 30.0
+    assert 40.0 <= second_wait <= MAX_RETRY_WAIT_SECONDS
+    assert first_wait + second_wait >= 60.0
     # Each retry names the tier and the model (shared-throttle, decision 4).
     assert f"P-TEST (decision, {settings.vre_chat_model}): transient error" in caplog.text
+
+
+async def test_a_server_error_keeps_the_short_growing_waits(recorded_waits):
+    planner_model = ScriptedModel(scripted_replies=[http_error(503), http_error(502), VALID_PLAN])
+
+    await call_planner(gateway_with_real_waits(planner_model))
+
+    first_wait, second_wait = recorded_waits
+    # A 5xx is not a limit counted per minute: 2 s, then 4 s, as in D-43.
+    assert 2.0 <= first_wait <= 3.0
+    assert 4.0 <= second_wait <= 6.0
+
+
+async def test_the_providers_limit_headers_reach_the_log_and_the_final_error(
+    recorded_waits, caplog
+):
+    caplog.set_level(logging.WARNING)
+    planner_model = ScriptedModel(scripted_replies=[rate_limit_with_limit_headers()] * 3)
+
+    with pytest.raises(ModelCallError) as raised:
+        await call_planner(gateway_with_real_waits(planner_model))
+
+    reported_limits = "[limits: limit-req-minute=2, remaining-req-minute=0]"
+    assert reported_limits in caplog.text
+    assert reported_limits in str(raised.value)
+
+
+def test_a_limit_report_is_empty_without_limit_headers():
+    assert rate_limit_report(rate_limit_error()) == ""
+    assert rate_limit_report(httpx.ConnectError("connection reset")) == ""
 
 
 async def test_tc_res_05_a_retry_after_header_is_followed_and_capped(recorded_waits):
@@ -226,19 +281,38 @@ async def test_calls_arriving_together_are_released_one_interval_apart():
     assert all(gap >= 0.15 for gap in gaps)
 
 
-def test_each_tier_has_its_own_limiter_shared_by_every_gateway():
+def gateway_limiters(monkeypatch, decision_model: str, writer_model: str):
+    """The limiters of two gateways built with these model names, from an empty registry."""
+    monkeypatch.setattr(graph.llm, "_shared_rate_limiters", {})
+    monkeypatch.setattr(settings, "vre_chat_model", decision_model)
+    monkeypatch.setattr(settings, "vre_writer_model", writer_model)
     first_gateway = ModelGateway(decision_model=ScriptedModel(), writer_model=ScriptedModel())
     second_gateway = ModelGateway(decision_model=ScriptedModel(), writer_model=ScriptedModel())
+    return first_gateway.rate_limiters_by_tier, second_gateway.rate_limiters_by_tier
 
-    first_limiters = first_gateway.rate_limiters_by_tier
-    # Decision 1: the two tiers do not share a limiter, so one cannot slow the other.
+
+def test_tiers_on_different_models_have_their_own_limiters_shared_by_every_gateway(monkeypatch):
+    first_limiters, second_limiters = gateway_limiters(monkeypatch, "model-a", "model-b")
+
+    # Decision 1: two models, two limits, so one tier cannot slow the other.
     assert first_limiters["decision"] is not first_limiters["writer"]
     # Decision 2: a second gateway takes tokens from the same buckets.
-    assert first_limiters["decision"] is second_gateway.rate_limiters_by_tier["decision"]
-    assert first_limiters["writer"] is second_gateway.rate_limiters_by_tier["writer"]
+    assert first_limiters["decision"] is second_limiters["decision"]
+    assert first_limiters["writer"] is second_limiters["writer"]
     # Choice A: each at its tier's rate from settings (80% of the measured limit).
     assert first_limiters["decision"].requests_per_second == settings.vre_decision_rps
     assert first_limiters["writer"].requests_per_second == settings.vre_writer_rps
+
+
+def test_tiers_on_the_same_model_share_its_one_limiter(monkeypatch):
+    # D-55: both tiers run on one model, and the provider counts its limit
+    # once, so both tiers must take from one bucket, not two at the full rate.
+    first_limiters, second_limiters = gateway_limiters(
+        monkeypatch, "voxtral-small-2507", "voxtral-small-2507"
+    )
+
+    assert first_limiters["decision"] is first_limiters["writer"]
+    assert first_limiters["writer"] is second_limiters["decision"]
 
 
 async def call_planner_in_a_run(gateway, budget: ModelCallBudget) -> PlannerOutput:
