@@ -92,7 +92,10 @@ class Settings(BaseSettings):
     # Requests to the model one run may send, retries included (D-41, D-43).
     # A Phase 3 brief sends at most 14, or 28 if every call needed its schema
     # retry; going over stops the run instead of letting a loop keep spending.
-    vre_max_model_calls_per_run: int = Field(default=30, ge=1, le=200)
+    # D-58: each run's budget is sized to its plan after the planner
+    # (graph/run_budget.py); this is the ceiling above it, 200 because the
+    # largest plan (six sub-questions, all `both`) can need 172.
+    vre_max_model_calls_per_run: int = Field(default=200, ge=1, le=200)
 
     # CONCEPT: document-ingestion, decision 3 (D-48). The embedding model gets
     # its own limiter, at 80% of its measured limit of 1 request a second, for
