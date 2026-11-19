@@ -90,6 +90,7 @@ async def write_passage_node(state: Mapping[str, Any], *, gateway: ModelGateway)
         "relevant": [],
         "answer": "",
         "support": None,
+        "support_quotes": [],
         "usefulness": None,
         "revised": False,
     }
@@ -172,7 +173,9 @@ async def check_support_node(state: Mapping[str, Any], *, gateway: ModelGateway)
         prompt_version=prompt_version,
     )
     logger.info("self-rag: IsSUP %s, evidence %r", reply.support, reply.evidence[:3])
-    return {"support": reply.support}
+    # The quotes are kept for citations (D-57, choice A); they are checked
+    # against the chunks where they are used, not here.
+    return {"support": reply.support, "support_quotes": list(reply.evidence)}
 
 
 def checked_quotes(
@@ -225,6 +228,8 @@ async def revise_node(state: Mapping[str, Any], *, gateway: ModelGateway) -> dic
     return {
         "answer": "\n".join(kept_quotes),
         "relevant": source_chunks,
+        # The answer is now the checked quotes; IsSUP's quotes no longer apply.
+        "support_quotes": [],
         "revised": True,
         "revisions_used": state.get("revisions_used", 0) + 1,
     }
@@ -252,7 +257,7 @@ def finish_answered_node(state: Mapping[str, Any]) -> dict[str, Any]:
 
 def finish_not_found_node(state: Mapping[str, Any]) -> dict[str, Any]:
     """No answer passed its checks: nothing is claimed, and no evidence is kept."""
-    return {"status": "not_found", "answer": "", "relevant": []}
+    return {"status": "not_found", "answer": "", "relevant": [], "support_quotes": []}
 
 
 # ---------------------------------------------------------------------------
