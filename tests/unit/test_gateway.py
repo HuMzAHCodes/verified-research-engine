@@ -334,7 +334,8 @@ async def test_the_run_budget_counts_every_request_and_stops_the_run(make_gatewa
     await call_planner_in_a_run(gateway, budget)
     assert budget.requests_sent == 2
 
-    with pytest.raises(ModelCallBudgetExceeded, match="VRE_MAX_MODEL_CALLS_PER_RUN=2"):
+    # The message names the limit and where it comes from (D-58).
+    with pytest.raises(ModelCallBudgetExceeded, match=r"the most it may send \(2: sized"):
         await call_planner_in_a_run(gateway, budget)
     assert planner_model.scripted_replies == [VALID_PLAN]  # the third request was never sent
 
