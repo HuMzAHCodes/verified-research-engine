@@ -12,8 +12,11 @@ Two kinds of question:
    searches with it and the question, and P-10 to P-14 grade, answer, and
    check. Each must come back answered, with its answer chunk among the
    evidence and its key figure in the answer. The first is the Walmart
-   question (page 23, "approximately 85% of our total revenue"); more are
-   added as they are labelled, so a fix is never tuned to one question.
+   question (page 23, "approximately 85% of our total revenue"); the others
+   are about other parts of the report (a contract commitment, the notes to
+   the financial statements), so a fix is never tuned to one question. Their
+   answer sentences were seen word for word in earlier live runs' logs; the
+   questions are written as a reader would ask, not in the report's words.
 2. A question the report cannot answer. It must come back not_found, with no
    answer and no evidence: the subgraph says it found nothing instead of
    making something up.
@@ -69,6 +72,22 @@ LABELLED_QUESTIONS = [
         question="How much of Symbotic's revenue comes from Walmart?",
         answer_chunk_words=("walmart", "% of our total revenue"),
         expected_in_answer="85",
+    ),
+    # "...from Walmart to purchase 400 APDs." (the 2025 Walmart agreement)
+    LabelledQuestion(
+        question="How many pickup and delivery systems has Walmart committed to buy from Symbotic?",
+        answer_chunk_words=("walmart to purchase 400 apds",),
+        expected_in_answer="400",
+    ),
+    # "...recognized $737.2 million and $723.2 million, respectively, of the
+    # contract liability balance at the beginning of the period as revenue..."
+    LabelledQuestion(
+        question=(
+            "How much revenue did Symbotic recognize in fiscal 2025 from payments "
+            "customers had made in advance?"
+        ),
+        answer_chunk_words=("737.2 million", "contract liability balance"),
+        expected_in_answer="737.2",
     ),
 ]
 
@@ -140,6 +159,21 @@ async def report_answer_chunk_ranks(
             f"  pass {pass_number}: answer chunk rank {shown_rank}"
             f" ({'reached' if reached else 'did not reach'} the grader)"
         )
+
+
+@pytest.mark.parametrize(
+    "labelled", LABELLED_QUESTIONS, ids=[case.question for case in LABELLED_QUESTIONS]
+)
+def test_each_label_points_at_a_stored_chunk(stored_report_id, labelled):
+    # No model call: a wrong label would make the check below fail for the
+    # wrong reason, so the label itself is checked first.
+    holding_chunks = [
+        chunk
+        for chunk in DocumentStore().chunks(stored_report_id)
+        if holds_words(chunk, labelled.answer_chunk_words)
+    ]
+    print(f"\n{labelled.question}: answer words in pages {[c.page for c in holding_chunks]}")
+    assert holding_chunks, "no stored chunk holds the label's answer words"
 
 
 @pytest.mark.parametrize(
