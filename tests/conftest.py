@@ -78,7 +78,10 @@ class ScriptedModel(BaseChatModel):
     is right for calls made one after another. replies_by_prompt_text is for
     calls made at the same time (parallel-fan-out): a reply goes to the call
     whose prompt contains its key, typically a sub-question's text, whatever
-    order the calls arrive in.
+    order the calls arrive in. A key can also be a tuple of texts that must all
+    be in the prompt (concept subgraph-wrapper): a `both` sub-question's text
+    is in its web prompt and in every Self-RAG prompt, so its replies are keyed
+    to the question together with a phrase of the prompt they answer.
     """
 
     scripted_replies: list[ScriptedReply] = Field(default_factory=list)
@@ -86,7 +89,9 @@ class ScriptedModel(BaseChatModel):
     # time, so which branch's call arrives first is not fixed. Replies in call
     # order would then go to the wrong branch on some runs: a flaky test.
     # Keying a reply to text in its prompt makes the script order-free.
-    replies_by_prompt_text: dict[str, list[ScriptedReply]] = Field(default_factory=dict)
+    replies_by_prompt_text: dict[str | tuple[str, ...], list[ScriptedReply]] = Field(
+        default_factory=dict
+    )
     received_conversations: list[list[BaseMessage]] = Field(default_factory=list)
     bound_tool_name: str | None = None
 
@@ -138,7 +143,9 @@ class ScriptedModel(BaseChatModel):
         say which reply it meant; both fail the test instead of guessing.
         """
         prompt_text = "\n".join(str(message.content) for message in messages)
-        matching_keys = [key for key in self.replies_by_prompt_text if key in prompt_text]
+        matching_keys = [
+            key for key in self.replies_by_prompt_text if key_matches(key, prompt_text)
+        ]
         if len(matching_keys) > 1:
             raise AssertionError(f"ScriptedModel: the prompt matches several keys {matching_keys}")
         if matching_keys:
@@ -152,6 +159,13 @@ class ScriptedModel(BaseChatModel):
                 f"{len(self.received_conversations) - 1} calls"
             )
         return self.scripted_replies.pop(0)
+
+
+def key_matches(key: str | tuple[str, ...], prompt_text: str) -> bool:
+    """A text key is in the prompt; a tuple key has every one of its texts in it."""
+    if isinstance(key, tuple):
+        return all(part in prompt_text for part in key)
+    return key in prompt_text
 
 
 def http_error(status_code: int) -> httpx.HTTPStatusError:
