@@ -15,10 +15,14 @@ How this check got here (Phase 4, concept self-rag):
 - Then it measured the answer chunk's rank: 10th by vector search, 19th by
   hybrid retrieval with BM25L. The diagnosis (D-53) found that the question's
   wording hurts both searches, and that BM25L over-rewards a repeated word.
-- Now the subgraph rewords each sub-question into search words (P-15) before
-  retrieving, and keyword search uses BM25Plus. The check asserts the answer
-  is in the top 6 for a search query as P-15 is asked to write it, and prints
-  the rank for the question as asked, so the gap stays visible.
+- Then the subgraph reworded each sub-question into search words (P-15 v1)
+  and keyword search moved to BM25Plus. The check asserts the answer is in
+  the top 6 for a hand-written search query, and prints the rank for the
+  question as asked, so the gap stays visible.
+- Later (D-56), P-15 v1 itself was measured live on Voxtral Small: its
+  queries missed (below rank 20). P-15 v2 writes a passage shaped like the
+  answer instead, searched beside the question. That path is checked by
+  test_self_rag_live.py; this check stays a fixed test of the retriever.
 
 Three embedding requests: vector search as asked, hybrid as asked, hybrid
 for the search query.
@@ -37,9 +41,8 @@ pytestmark = pytest.mark.live
 
 ANNUAL_REPORT_PATH = Path("data/uploads/symbotic-annual-report.pdf")
 WALMART_QUESTION = "How much of Symbotic's revenue comes from Walmart?"
-# A search query of the kind P-15 is asked to write: 6 to 16 words, names
-# kept, likely report words added. The P-15 rewording itself is checked by
-# the subgraph's own live check, once P-15 is built.
+# A hand-written search query (D-53): names kept, likely report words added.
+# A fixed input, so a change in this rank is a change in the retriever.
 WALMART_SEARCH_QUERY = "Walmart share of total revenue largest customer"
 # Words only the answer chunk holds (checked by searching chunks.jsonl).
 ANSWER_WORDS = ("walmart", "% of our total revenue")
@@ -102,7 +105,7 @@ async def test_hybrid_retrieval_puts_the_answer_chunk_in_the_top_6():
     print(f"  vector search only, question as asked: {shown_rank(answer_rank(by_meaning_only))}")
     print(f"  hybrid, question as asked:             {shown_rank(answer_rank(hybrid_as_asked))}")
     search_query_rank = answer_rank(hybrid_search_query)
-    print(f"  hybrid, search query (what P-15 sends): {shown_rank(search_query_rank)}")
+    print(f"  hybrid, hand-written search query:      {shown_rank(search_query_rank)}")
     assert search_query_rank is not None and search_query_rank <= RETRIEVED_CHUNKS, (
         "hybrid retrieval must put the answer chunk in the top 6 for the search query (D-53)"
     )
