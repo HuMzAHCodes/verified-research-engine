@@ -133,13 +133,16 @@ class SectionDraft(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class SearchQuery(BaseModel):
-    """A search query for finding the answer in the uploaded documents."""
+# D-56: a passage shaped like the answer (HyDE), not a list of search words.
+# It is only searched with; it is never shown, answered from, or quoted.
+class SearchPassage(BaseModel):
+    """A short passage written the way the documents would state the answer."""
 
-    query: str = Field(
+    passage: str = Field(
         description=(
-            "6 to 16 words: the names and numbers from the question, plus words "
-            "the documents are likely to use. Not a question, and not an answer."
+            "One or two sentences in the documents' own voice (we, our), stating "
+            "the answer the way the documents would. Unknown figures as "
+            "placeholders such as X% or $X million."
         )
     )
 
