@@ -1,14 +1,15 @@
 """The Self-RAG subgraph's nodes and the decisions between them.
 
-CONCEPT: self-rag (D-50, D-51, D-53). Each node does one step and returns only
+CONCEPT: self-rag (D-50, D-51, D-53, D-56). Each node does one step and returns only
 the fields it changed. Every model call goes through the gateway, so it is
 throttled, retried, counted against the run's budget, and traced under its
 prompt id (decision 5). The gateway and the retriever are given to the nodes
 by build_self_rag_graph, so tests pass ScriptedModel and a store in a
 temporary folder (D-25).
 
-    reword          P-15  the sub-question as a search query (first, every time: D-53)
-    retrieve              hybrid retrieval over the run's documents only (D-52, D-53)
+    write_passage   P-15  a passage shaped like the answer, to search with (HyDE, D-56)
+    retrieve              hybrid retrieval with the question and the passage, merged,
+                          over the run's documents only (D-52, D-53, D-56)
     grade           P-10  which retrieved chunks are on topic, in one call (choice B)
     generate        P-11  an answer from the relevant chunks only
     check_support   P-12  IsSUP: is every claim in the chunks?
@@ -18,6 +19,11 @@ temporary folder (D-25).
 
 The route_* functions are the decisions between nodes. They are pure: they
 read the state and name the next node, so each rule is tested without a model.
+
+Every node logs what it decided at INFO (pages retrieved, chunks kept, the
+draft, both verdicts, quotes kept), so a run that ends not_found shows where
+it turned (Phase 4, self-rag, step 4: the first live failure printed only the
+end state, and could not be read).
 """
 
 import logging
@@ -33,11 +39,11 @@ from graph.schemas import (
     DraftAnswer,
     QuotedAnswer,
     RelevantChunks,
-    SearchQuery,
+    SearchPassage,
     SupportCheck,
     UsefulnessCheck,
 )
-from graph.self_rag.state import MAX_REVISIONS, MAX_SEARCH_QUERIES
+from graph.self_rag.state import MAX_REVISIONS, MAX_SEARCH_PASSES
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +52,8 @@ RETRIEVAL_CALL_ID = "SELF-RAG-RETRIEVE"
 
 
 def may_search_again(state: Mapping[str, Any]) -> bool:
-    """True while the sub-question has used fewer than its two search queries."""
-    return len(state.get("search_queries", [])) < MAX_SEARCH_QUERIES
+    """True while the sub-question has used fewer than its two search passes."""
+    return len(state.get("search_passages", [])) < MAX_SEARCH_PASSES
 
 
 # ---------------------------------------------------------------------------
@@ -55,28 +61,30 @@ def may_search_again(state: Mapping[str, Any]) -> bool:
 # ---------------------------------------------------------------------------
 
 
-async def reword_node(state: Mapping[str, Any], *, gateway: ModelGateway) -> dict[str, Any]:
-    """P-15: a search query for the sub-question, and a clean pass.
+async def write_passage_node(state: Mapping[str, Any], *, gateway: ModelGateway) -> dict[str, Any]:
+    """P-15: a passage shaped like the answer, to search with, and a clean pass (D-56).
 
     The first time, from the question alone. The second time, the model is
-    told the first query failed and asked for other words. An empty reply
-    falls back to the question itself, so retrieval always has something to
-    search with.
+    shown the passage that failed and asked for the answer in other words.
+    An empty reply falls back to the question itself, so retrieval always
+    has something to search with. The passage is made up by design (figures
+    as placeholders): it is only searched with, never answered from.
     """
-    previous_queries = state.get("search_queries", [])
-    prompt_id, prompt_version = self_rag_prompts.SEARCH_QUERY_PROMPT
+    previous_passages = state.get("search_passages", [])
+    prompt_id, prompt_version = self_rag_prompts.SEARCH_PASSAGE_PROMPT
     reply = await gateway.structured(
-        SearchQuery,
-        self_rag_prompts.build_search_query_messages(
-            state["question"], previous_query=previous_queries[-1] if previous_queries else None
+        SearchPassage,
+        self_rag_prompts.build_search_passage_messages(
+            state["question"],
+            previous_passage=previous_passages[-1] if previous_passages else None,
         ),
         prompt_id=prompt_id,
         prompt_version=prompt_version,
     )
-    search_query = " ".join(reply.query.split()) or state["question"]
-    logger.info("self-rag: search query %d: %r", len(previous_queries) + 1, search_query)
+    search_passage = " ".join(reply.passage.split()) or state["question"]
+    logger.info("self-rag: search passage %d: %r", len(previous_passages) + 1, search_passage)
     return {
-        "search_queries": [*previous_queries, search_query],
+        "search_passages": [*previous_passages, search_passage],
         # A second pass starts clean; the counters above carry over.
         "retrieved": [],
         "relevant": [],
@@ -88,9 +96,19 @@ async def reword_node(state: Mapping[str, Any], *, gateway: ModelGateway) -> dic
 
 
 async def retrieve_node(state: Mapping[str, Any], *, retriever: HybridRetriever) -> dict[str, Any]:
-    """The best chunks for the latest search query, from the run's documents only."""
-    retrieved = await retriever.retrieve(
-        state["search_queries"][-1], state["document_ids"], prompt_id=RETRIEVAL_CALL_ID
+    """The best chunks for the question and the latest passage, merged (D-56).
+
+    The question is searched as asked beside the passage, so a passage that
+    guesses the wrong shape cannot steer the search alone. Both go in one
+    embedding request. Only the run's documents are searched.
+    """
+    retrieved = await retriever.retrieve_for_texts(
+        [state["question"], state["search_passages"][-1]],
+        state["document_ids"],
+        prompt_id=RETRIEVAL_CALL_ID,
+    )
+    logger.info(
+        "self-rag: retrieved %d chunks, pages %s", len(retrieved), [c.page for c in retrieved]
     )
     return {"retrieved": retrieved}
 
@@ -117,6 +135,12 @@ async def grade_node(state: Mapping[str, Any], *, gateway: ModelGateway) -> dict
     if unknown_labels:
         logger.warning("self-rag: P-10 returned unknown labels %s, dropped", sorted(unknown_labels))
     relevant = [chunk for label, chunk in labelled_chunks.items() if label in returned_labels]
+    logger.info(
+        "self-rag: P-10 kept %d of %d chunks: %s",
+        len(relevant),
+        len(retrieved),
+        [f"{label} p{chunk.page}" for label, chunk in labelled_chunks.items() if chunk in relevant],
+    )
     return {"relevant": relevant}
 
 
@@ -131,7 +155,9 @@ async def generate_node(state: Mapping[str, Any], *, gateway: ModelGateway) -> d
         prompt_id=prompt_id,
         prompt_version=prompt_version,
     )
-    return {"answer": reply.answer.strip()}
+    answer = reply.answer.strip()
+    logger.info("self-rag: P-11 draft: %r", answer[:300])
+    return {"answer": answer}
 
 
 async def check_support_node(state: Mapping[str, Any], *, gateway: ModelGateway) -> dict[str, Any]:
@@ -145,6 +171,7 @@ async def check_support_node(state: Mapping[str, Any], *, gateway: ModelGateway)
         prompt_id=prompt_id,
         prompt_version=prompt_version,
     )
+    logger.info("self-rag: IsSUP %s, evidence %r", reply.support, reply.evidence[:3])
     return {"support": reply.support}
 
 
@@ -189,6 +216,7 @@ async def revise_node(state: Mapping[str, Any], *, gateway: ModelGateway) -> dic
         prompt_version=prompt_version,
     )
     kept_quotes, source_chunks = checked_quotes(reply.quotes, state["relevant"])
+    logger.info("self-rag: P-13 kept %d of %d quotes", len(kept_quotes), len(reply.quotes))
     dropped_count = len(reply.quotes) - len(kept_quotes)
     if dropped_count:
         logger.warning(
@@ -234,14 +262,14 @@ def finish_not_found_node(state: Mapping[str, Any]) -> dict[str, Any]:
 
 def route_at_start(state: Mapping[str, Any]) -> str:
     """No documents for the run: nothing to search, so no call is spent."""
-    return "reword" if state.get("document_ids") else "finish_not_found"
+    return "write_passage" if state.get("document_ids") else "finish_not_found"
 
 
 def route_after_grading(state: Mapping[str, Any]) -> str:
-    """Relevant chunks: answer. None: search once more with other words, else stop."""
+    """Relevant chunks: answer. None: search once more with a new passage, else stop."""
     if state.get("relevant"):
         return "generate"
-    return "reword" if may_search_again(state) else "finish_not_found"
+    return "write_passage" if may_search_again(state) else "finish_not_found"
 
 
 def route_after_support(state: Mapping[str, Any]) -> str:
@@ -263,7 +291,7 @@ def route_after_revision(state: Mapping[str, Any]) -> str:
 
 
 def route_after_usefulness(state: Mapping[str, Any]) -> str:
-    """Useful: done. Not useful: search once more with other words, else stop."""
+    """Useful: done. Not useful: search once more with a new passage, else stop."""
     if state.get("usefulness") == "useful":
         return "finish_answered"
-    return "reword" if may_search_again(state) else "finish_not_found"
+    return "write_passage" if may_search_again(state) else "finish_not_found"
