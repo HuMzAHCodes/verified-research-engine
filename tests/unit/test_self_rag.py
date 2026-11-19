@@ -109,8 +109,8 @@ def draft(answer: str) -> dict:
     return {"answer": answer}
 
 
-def support(level: str) -> dict:
-    return {"evidence": [], "support": level}
+def support(level: str, *evidence: str) -> dict:
+    return {"evidence": list(evidence), "support": level}
 
 
 def quotes(*quoted: str) -> dict:
@@ -415,3 +415,60 @@ def test_checked_quotes_keeps_only_real_quotes_and_their_chunks(store):
 
     assert kept == ["Northwind,  our largest customer, accounted for 60%"]
     assert [chunk.text for chunk in sources] == [ANSWER_TEXT]
+
+
+async def test_an_answered_result_keeps_issups_quotes_for_citations(run_subgraph):
+    # D-57, choice A: the wrapper cites only the chunks holding these quotes.
+    supporting_quote = "Northwind, our largest customer, accounted for 60%"
+    result, _, _ = await run_subgraph(
+        [
+            search_passage(FIRST_PASSAGE),
+            relevant("C1", "C2"),
+            draft("Northwind accounted for 60% of Contoso's total revenue in 2025."),
+            support("fully_supported", supporting_quote),
+            usefulness("useful"),
+        ]
+    )
+
+    assert result.status == "answered"
+    assert result.support_quotes == [supporting_quote]
+
+
+async def test_quotes_from_a_failed_first_pass_do_not_reach_the_result(run_subgraph):
+    # Pass 1's quotes back an answer that was not useful; pass 2 starts clean.
+    result, _, _ = await run_subgraph(
+        [
+            search_passage(FIRST_PASSAGE),
+            relevant("C2"),
+            draft("Contoso signed a supply agreement with Northwind."),
+            support("fully_supported", BACKGROUND_TEXT),
+            usefulness("not_useful"),
+            search_passage(SECOND_PASSAGE),
+            relevant("C1"),
+            draft("Northwind accounted for 60% of total revenue."),
+            support("fully_supported", ANSWER_TEXT),
+            usefulness("useful"),
+        ]
+    )
+
+    assert result.support_quotes == [ANSWER_TEXT]
+
+
+async def test_a_revised_or_not_found_result_has_no_issup_quotes(run_subgraph):
+    revised, _, _ = await run_subgraph(
+        [
+            search_passage(FIRST_PASSAGE),
+            relevant("C1"),
+            draft("Northwind is a strong, strategic customer providing 60% of revenue."),
+            support("partially_supported", "a quote IsSUP gave"),
+            quotes(ANSWER_TEXT),
+            usefulness("useful"),
+        ]
+    )
+    not_found, _, _ = await run_subgraph(
+        [search_passage(FIRST_PASSAGE), relevant(), search_passage(SECOND_PASSAGE), relevant()]
+    )
+
+    # A revised answer is made of checked quotes, which give its citations.
+    assert (revised.status, revised.support_quotes) == ("answered_with_quotes", [])
+    assert (not_found.status, not_found.support_quotes) == ("not_found", [])
