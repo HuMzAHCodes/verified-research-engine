@@ -70,7 +70,8 @@ def test_rates_and_budget_default_to_the_measured_limits(monkeypatch):
 
     # 80% of the 1.00 request a second both models allow (D-43, D-55).
     assert (defaults.vre_decision_rps, defaults.vre_writer_rps) == (0.8, 0.8)
-    assert defaults.vre_max_model_calls_per_run == 30
+    # D-58: the ceiling above the budget each run sizes to its plan.
+    assert defaults.vre_max_model_calls_per_run == 200
 
 
 def test_models_default_to_the_one_measured_usable_model_pinned_by_date(monkeypatch):
