@@ -227,3 +227,57 @@ def test_a_word_repeated_many_times_does_not_beat_a_chunk_matching_more_words(
     assert found[0].chunk_index == 1
     # Chunks holding no query word are left out, though BM25Plus scores them.
     assert all(chunk.chunk_index in (0, 1) for chunk in found)
+
+
+async def test_a_second_text_lifts_the_chunk_it_finds_in_one_request(store, make_retriever):
+    # D-56: the question and a search passage, merged. The question alone
+    # ranks the Northwind chunk last; the passage ranks it first by meaning
+    # and by keyword, so merged it moves up, while the question's own best
+    # chunk keeps first place (a passage cannot take over the search alone).
+    save_document(
+        store,
+        "report",
+        [
+            ("Northwind accounted for 60% of our total revenue.", EAST),
+            ("The board of directors meets four times a year.", NORTH),
+            ("Our largest customer agreement was renewed.", NORTH_EAST),
+        ],
+    )
+    question = "How often does the board meet?"
+    passage = "Northwind accounted for X% of our total revenue."
+    retriever, embedding_model = make_retriever({question: NORTH_EAST, passage: EAST})
+
+    merged = await retriever.retrieve_for_texts([question, passage], ["report"], prompt_id="T")
+    only_question = await retriever.retrieve(question, ["report"], prompt_id="T")
+
+    # Both texts in one request, in the order given.
+    assert embedding_model.received_batches[0] == [question, passage]
+    # Pages: 1 Northwind, 2 board, 3 agreement.
+    assert [chunk.page for chunk in only_question] == [2, 3, 1]
+    assert [chunk.page for chunk in merged] == [2, 1, 3]
+
+
+async def test_one_text_gives_exactly_what_retrieve_gives(store, make_retriever):
+    save_document(
+        store,
+        "report",
+        [("Northwind accounted for 60% of revenue.", EAST), ("The board meets.", NORTH)],
+    )
+    retriever, _ = make_retriever({"Northwind revenue": EAST})
+
+    single = await retriever.retrieve("Northwind revenue", ["report"], prompt_id="T")
+    as_texts = await retriever.retrieve_for_texts(
+        ["Northwind revenue", "Northwind revenue", "   "], ["report"], prompt_id="T"
+    )
+
+    # Repeated and empty texts are dropped, so the scores are the same too.
+    assert [(c.chunk_id, c.score) for c in as_texts] == [(c.chunk_id, c.score) for c in single]
+
+
+async def test_no_texts_or_no_documents_means_no_request(store, make_retriever):
+    save_document(store, "report", [("Northwind accounted for 60% of revenue.", EAST)])
+    retriever, embedding_model = make_retriever({})
+
+    assert await retriever.retrieve_for_texts(["  "], ["report"], prompt_id="T") == []
+    assert await retriever.retrieve_for_texts(["Northwind"], [], prompt_id="T") == []
+    assert embedding_model.received_batches == []
