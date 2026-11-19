@@ -112,8 +112,8 @@ class ModelCallBudget:
         if self.requests_sent >= self.limit:
             raise ModelCallBudgetExceeded(
                 f"{prompt_id}: this run has already sent {self.requests_sent} model requests, "
-                f"the most it may send (VRE_MAX_MODEL_CALLS_PER_RUN={self.limit}); "
-                "stopping instead of sending more"
+                f"the most it may send ({self.limit}: sized to the run's plan, D-58, and never "
+                "above VRE_MAX_MODEL_CALLS_PER_RUN); stopping instead of sending more"
             )
         self.requests_sent += 1
 
