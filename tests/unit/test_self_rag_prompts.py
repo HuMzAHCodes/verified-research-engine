@@ -14,13 +14,13 @@ from graph.prompts.self_rag import (
     ANSWER_PROMPT,
     GRADING_PROMPT,
     REVISION_PROMPT,
-    SEARCH_QUERY_PROMPT,
+    SEARCH_PASSAGE_PROMPT,
     SUPPORT_PROMPT,
     USEFULNESS_PROMPT,
     build_answer_messages,
     build_grading_messages,
     build_revision_messages,
-    build_search_query_messages,
+    build_search_passage_messages,
     build_support_messages,
     build_usefulness_messages,
     label_chunks,
@@ -30,7 +30,7 @@ from graph.schemas import (
     DraftAnswer,
     QuotedAnswer,
     RelevantChunks,
-    SearchQuery,
+    SearchPassage,
     SupportCheck,
     UsefulnessCheck,
 )
@@ -60,16 +60,16 @@ def labelled_chunks():
     )
 
 
-def test_each_prompt_has_its_id_and_first_version():
+def test_each_prompt_has_its_id_and_current_version():
     assert [
-        SEARCH_QUERY_PROMPT,
+        SEARCH_PASSAGE_PROMPT,
         GRADING_PROMPT,
         ANSWER_PROMPT,
         SUPPORT_PROMPT,
         REVISION_PROMPT,
         USEFULNESS_PROMPT,
     ] == [
-        ("P-15", "v1"),
+        ("P-15", "v2"),
         ("P-10", "v1"),
         ("P-11", "v1"),
         ("P-12", "v1"),
@@ -84,23 +84,25 @@ def test_labels_run_from_c1_in_the_order_given():
     assert label_chunks([first, second]) == {"C1": first, "C2": second}
 
 
-def test_p15_asks_for_search_words_not_a_question_or_an_answer():
-    system_message, human_message = build_search_query_messages(QUESTION)
+def test_p15_asks_for_the_answer_as_the_report_would_state_it_with_placeholders():
+    # D-56: P-15 v2 is HyDE, with the wording that was measured.
+    system_message, human_message = build_search_passage_messages(QUESTION)
 
-    assert "6 to 16 words." in system_message.content
-    assert "Keep every name, product, and number" in system_message.content
-    assert "Do not answer the question." in system_message.content
-    # The example uses a fictional company, never the report the live checks use.
-    assert "Contoso" in system_message.content
+    assert "as a company's annual report would state the" in system_message.content
+    assert "placeholders such as X% or $X million" in system_message.content
+    assert "Do not\nadd anything the question does not ask about." in system_message.content
+    # Nothing in the prompt is tuned to the report the live checks use.
     assert "Walmart" not in system_message.content
+    assert "Symbotic" not in system_message.content
     assert human_message.content == f"Question: {QUESTION}"
 
 
-def test_p15_retry_names_the_failed_query_and_asks_for_other_words():
-    _, human_message = build_search_query_messages(QUESTION, previous_query="Northwind revenue")
+def test_p15_retry_shows_the_failed_passage_and_asks_for_other_words():
+    failed_passage = "Northwind accounted for X% of our revenue."
+    _, human_message = build_search_passage_messages(QUESTION, previous_passage=failed_passage)
 
-    assert "The previous search query was: Northwind revenue" in human_message.content
-    assert "Write a different query" in human_message.content
+    assert f"did not find the answer:\n{failed_passage}" in human_message.content
+    assert "as a different part of the report would state it" in human_message.content
 
 
 def test_p10_grades_at_topic_level_and_frames_chunks_with_labels_and_pages(labelled_chunks):
@@ -170,7 +172,7 @@ def test_neutralising_leaves_ordinary_text_alone():
 
 
 def test_the_schemas_accept_well_formed_replies():
-    assert SearchQuery(query="Northwind share of total revenue").query
+    assert SearchPassage(passage="Northwind accounted for X% of our revenue.").passage
     assert RelevantChunks(relevant_labels=["C1"]).relevant_labels == ["C1"]
     assert RelevantChunks().relevant_labels == []
     assert DraftAnswer(answer=ANSWER).answer == ANSWER
@@ -184,7 +186,7 @@ def test_the_schemas_accept_well_formed_replies():
     [
         (SupportCheck, {"support": "mostly_supported"}),
         (UsefulnessCheck, {"reason": "x", "usefulness": "somewhat"}),
-        (SearchQuery, {}),
+        (SearchPassage, {}),
         (DraftAnswer, {}),
     ],
 )
