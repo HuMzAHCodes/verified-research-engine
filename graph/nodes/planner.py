@@ -9,14 +9,22 @@ decision in this project:
 
 Requirements: FR-PLN-01 (structured plan), FR-PLN-03 (cap), FR-PLN-04
 (web only when no documents were uploaded).
+
+CONCEPT: subgraph-wrapper. From Phase 4 the planner is shown the documents'
+file names, read from the store, not their ids (decision 7), and once the
+plan is checked it sizes the run's request budget to the plan (D-58, choice
+C): the plan is what decides how many branches of each kind will run.
 """
 
 import logging
 from collections.abc import Mapping
 from typing import Any
 
+from graph.document_store import DocumentStore
 from graph.llm import ModelGateway
+from graph.nodes.document_researcher import file_names_by_document_id
 from graph.prompts import planner as planner_prompt
+from graph.run_budget import fit_budget_to_plan
 from graph.schemas import PlannedQuestion, PlannerOutput
 from graph.state import SubQuestion
 
@@ -32,17 +40,24 @@ async def planner_node(
     *,
     gateway: ModelGateway,
     max_sub_questions: int,
+    document_store: DocumentStore | None = None,
 ) -> dict[str, list[SubQuestion]]:
     """Plan the run: one model call, then checks in code.
 
-    The gateway and the cap are passed in by build_graph (D-25), so tests can
-    pass a scripted gateway and a small cap. The node returns only the field
-    it changes, as every node does.
+    The gateway, the cap, and the store are passed in by build_graph (D-25),
+    so tests can pass a scripted gateway and a small cap. build_graph always
+    passes the store; without one (node tests, the planner's live check) the
+    ids stand in for the file names. The node returns only the field it
+    changes, as every node does.
     """
     topic: str = state["topic"]
-    # Phase 4 resolves document ids to file names from the documents table;
-    # until then the ids stand in for the names. In phase 1 the list is empty.
-    uploaded_file_names: list[str] = list(state.get("document_ids", []))
+    document_ids: list[str] = list(state.get("document_ids", []))
+    # Decision 7: the names P-01 can judge a file by, not a hex id.
+    uploaded_file_names = (
+        list(file_names_by_document_id(document_store, document_ids).values())
+        if document_store is not None
+        else document_ids
+    )
     preferences = state.get("preferences")
     report_format = getattr(preferences, "report_format", "") if preferences else ""
 
@@ -65,7 +80,10 @@ async def planner_node(
         max_sub_questions=max_sub_questions,
         documents_uploaded=bool(uploaded_file_names),
     )
-    return {"sub_questions": assign_ids(checked_questions)}
+    sub_questions = assign_ids(checked_questions)
+    # D-58: from here on, the run may send only what this plan can need.
+    fit_budget_to_plan(sub_questions)
+    return {"sub_questions": sub_questions}
 
 
 def check_planned_questions(
