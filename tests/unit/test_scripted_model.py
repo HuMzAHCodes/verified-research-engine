@@ -61,3 +61,21 @@ async def test_a_second_call_for_a_used_up_key_fails_the_test():
 
     with pytest.raises(AssertionError, match="ran out of replies for 'What does it sell\\?'"):
         await ask(model, "What does it sell?")
+
+
+async def test_a_tuple_key_needs_every_one_of_its_texts_in_the_prompt():
+    # Concept subgraph-wrapper: the same question appears in prompts of
+    # different kinds, so a key names the question and the kind together.
+    model = ScriptedModel(
+        replies_by_prompt_text={
+            ("Grade the chunks.", "Who buys it?"): ["C1"],
+            ("Extract from pages.", "Who buys it?"): ["Retailers."],
+        }
+    )
+
+    answers = await asyncio.gather(
+        ask(model, "Extract from pages. Question: Who buys it?"),
+        ask(model, "Grade the chunks. Question: Who buys it?"),
+    )
+
+    assert answers == ["Retailers.", "C1"]
