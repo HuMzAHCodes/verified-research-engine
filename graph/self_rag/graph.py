@@ -94,4 +94,5 @@ async def run_self_rag(
         evidence=final_state.get("relevant", []),
         search_passages=final_state.get("search_passages", []),
         revised=final_state.get("revised", False),
+        support_quotes=final_state.get("support_quotes", []),
     )
