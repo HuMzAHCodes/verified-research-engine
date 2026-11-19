@@ -50,6 +50,10 @@ class SelfRagState(TypedDict, total=False):
     relevant: list[RetrievedChunk]
     answer: str
     support: SupportLevel | None
+    # IsSUP's quotes from the chunks that back the answer, as the model gave
+    # them (D-57, choice A): concept subgraph-wrapper cites only the chunks
+    # that hold them. Cleared with the rest of the pass.
+    support_quotes: list[str]
     usefulness: Usefulness | None
     revised: bool
 
@@ -69,3 +73,7 @@ class SelfRagResult(BaseModel):
     # The search passages used, for logs and reports; never evidence.
     search_passages: list[str] = Field(default_factory=list)
     revised: bool = False
+    # IsSUP's supporting quotes for the answer, unchecked (D-57, choice A).
+    # Empty when the answer was revised (its quotes are the answer itself,
+    # already checked) or when nothing was found.
+    support_quotes: list[str] = Field(default_factory=list)
