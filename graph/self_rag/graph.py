@@ -3,15 +3,15 @@
 CONCEPT: self-rag. The shape, with every loop capped (decision 7, D-53):
 
     START: no documents                    -> finish_not_found
-    reword -> retrieve -> grade
+    write_passage -> retrieve -> grade
     grade: some relevant                   -> generate -> check_support
-    grade: none relevant                   -> reword (once more), else finish_not_found
+    grade: none relevant                   -> write_passage (once more), else finish_not_found
     check_support: fully supported         -> check_usefulness
     check_support: not fully               -> revise (once per sub-question), else finish_not_found
     revise: quotes kept                    -> check_usefulness
     revise: no quote kept                  -> finish_not_found
     check_usefulness: useful               -> finish_answered
-    check_usefulness: not useful           -> reword (once more), else finish_not_found
+    check_usefulness: not useful           -> write_passage (once more), else finish_not_found
 
 The longest path visits 14 nodes, inside LangGraph's default limit of 25.
 Concept 4 (subgraph-wrapper) runs it as the document branch of a research
@@ -32,7 +32,7 @@ from graph.self_rag.state import SelfRagResult, SelfRagState
 def build_self_rag_graph(gateway: ModelGateway, retriever: HybridRetriever) -> CompiledStateGraph:
     """Wire the nodes and the decisions between them, and compile."""
     graph_builder = StateGraph(SelfRagState)
-    graph_builder.add_node("reword", partial(nodes.reword_node, gateway=gateway))
+    graph_builder.add_node("write_passage", partial(nodes.write_passage_node, gateway=gateway))
     graph_builder.add_node("retrieve", partial(nodes.retrieve_node, retriever=retriever))
     graph_builder.add_node("grade", partial(nodes.grade_node, gateway=gateway))
     graph_builder.add_node("generate", partial(nodes.generate_node, gateway=gateway))
@@ -44,11 +44,13 @@ def build_self_rag_graph(gateway: ModelGateway, retriever: HybridRetriever) -> C
     graph_builder.add_node("finish_answered", nodes.finish_answered_node)
     graph_builder.add_node("finish_not_found", nodes.finish_not_found_node)
 
-    graph_builder.add_conditional_edges(START, nodes.route_at_start, ["reword", "finish_not_found"])
-    graph_builder.add_edge("reword", "retrieve")
+    graph_builder.add_conditional_edges(
+        START, nodes.route_at_start, ["write_passage", "finish_not_found"]
+    )
+    graph_builder.add_edge("write_passage", "retrieve")
     graph_builder.add_edge("retrieve", "grade")
     graph_builder.add_conditional_edges(
-        "grade", nodes.route_after_grading, ["generate", "reword", "finish_not_found"]
+        "grade", nodes.route_after_grading, ["generate", "write_passage", "finish_not_found"]
     )
     graph_builder.add_edge("generate", "check_support")
     graph_builder.add_conditional_edges(
@@ -62,7 +64,7 @@ def build_self_rag_graph(gateway: ModelGateway, retriever: HybridRetriever) -> C
     graph_builder.add_conditional_edges(
         "check_usefulness",
         nodes.route_after_usefulness,
-        ["finish_answered", "reword", "finish_not_found"],
+        ["finish_answered", "write_passage", "finish_not_found"],
     )
     graph_builder.add_edge("finish_answered", END)
     graph_builder.add_edge("finish_not_found", END)
@@ -81,7 +83,7 @@ async def run_self_rag(
         {
             "question": question,
             "document_ids": list(document_ids),
-            "search_queries": [],
+            "search_passages": [],
             "revisions_used": 0,
         },
         config={"run_name": "self_rag"},
@@ -90,6 +92,6 @@ async def run_self_rag(
         status=final_state["status"],
         answer=final_state.get("answer", ""),
         evidence=final_state.get("relevant", []),
-        search_queries=final_state.get("search_queries", []),
+        search_passages=final_state.get("search_passages", []),
         revised=final_state.get("revised", False),
     )
