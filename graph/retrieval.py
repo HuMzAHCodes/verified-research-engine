@@ -20,9 +20,19 @@ CONCEPT: self-rag, D-53. Measured on the annual report, a question as the
 planner writes it ("How much of Symbotic's revenue comes from Walmart?")
 puts the answer chunk 10th by meaning and 18th by keyword; reworded as
 search words ("Walmart share of total revenue largest customer") it is 1st
-in both. So the Self-RAG subgraph rewords every sub-question into a search
-query (P-15) before calling retrieve(); this module searches whatever query
-it is given.
+in both. So D-53 had the Self-RAG subgraph reword every sub-question into a
+search query (P-15 v1) first; D-56 below replaced that query with a passage.
+This module searches whatever texts it is given.
+
+CONCEPT: self-rag, D-56 (multi-query). On Voxtral Small, P-15's search
+queries missed the answer chunk (below rank 20), while a passage written the
+way the report would state the answer (HyDE) found it 1st. The subgraph now
+searches with two texts at once, the question as asked and that passage, by
+retrieve_for_texts(): each text is searched both ways and merged as above,
+then the per-text rankings are merged the same way. All texts go in one
+embedding request, so a second text costs no extra request. Measured: the
+question alone ranks the answer 9th, the passage alone 1st, both merged 3rd;
+the question is kept so a misleading passage cannot steer the search alone.
 """
 
 import logging
@@ -124,41 +134,73 @@ class HybridRetriever:
     async def retrieve(
         self, query: str, document_ids: list[str], *, prompt_id: str
     ) -> list[RetrievedChunk]:
-        """The best chunks for the query from these documents only, best first.
+        """The best chunks for one query from these documents only, best first.
 
         One embedding request (the query), through the gateway's embed tier
         and the run's budget, named by prompt_id in logs and traces. Each
         returned chunk's score is its fused rank score, not a similarity:
         it orders the chunks and means nothing on its own.
         """
+        return await self.retrieve_for_texts([query], document_ids, prompt_id=prompt_id)
+
+    async def retrieve_for_texts(
+        self, search_texts: list[str], document_ids: list[str], *, prompt_id: str
+    ) -> list[RetrievedChunk]:
+        """The best chunks for several search texts at once, merged, best first (D-56).
+
+        Each text is searched by meaning and by keyword and merged, exactly as
+        for one query; the per-text rankings are then merged by the same rank
+        fusion. Empty and repeated texts are dropped first, so one text gives
+        the same result, scores included, as retrieve(). All texts are
+        embedded in one request.
+        """
         unique_document_ids = list(dict.fromkeys(document_ids))
-        if not unique_document_ids:
+        unique_texts = list(dict.fromkeys(text for text in search_texts if text.strip()))
+        if not unique_document_ids or not unique_texts:
             return []
 
-        (query_vector,) = await self.gateway.embed([query], prompt_id=prompt_id)
-        by_meaning = self.store.search(
-            unique_document_ids, query_vector, k=self.candidates_per_search
-        )
-        by_keyword = self.keyword_search(unique_document_ids, query)
+        text_vectors = await self.gateway.embed(unique_texts, prompt_id=prompt_id)
+        chunks_by_id: dict[str, RetrievedChunk] = {}
+        rankings_by_text: list[list[tuple[str, float]]] = []
+        for search_text, text_vector in zip(unique_texts, text_vectors, strict=True):
+            by_meaning = self.store.search(
+                unique_document_ids, text_vector, k=self.candidates_per_search
+            )
+            by_keyword = self.keyword_search(unique_document_ids, search_text)
+            for chunk in [*by_meaning, *by_keyword]:
+                chunks_by_id.setdefault(chunk.chunk_id, chunk)
+            rankings_by_text.append(
+                reciprocal_rank_fusion(
+                    [
+                        [chunk.chunk_id for chunk in by_meaning],
+                        [chunk.chunk_id for chunk in by_keyword],
+                    ]
+                )
+            )
+            logger.info(
+                "%s: %d by meaning, %d by keyword, %d found by both, for %r",
+                prompt_id,
+                len(by_meaning),
+                len(by_keyword),
+                len({chunk.chunk_id for chunk in by_meaning} & {c.chunk_id for c in by_keyword}),
+                search_text[:60],
+            )
 
-        chunks_by_id = {chunk.chunk_id: chunk for chunk in [*by_meaning, *by_keyword]}
-        fused_ranking = reciprocal_rank_fusion(
-            [
-                [chunk.chunk_id for chunk in by_meaning],
-                [chunk.chunk_id for chunk in by_keyword],
-            ]
-        )
+        if len(rankings_by_text) == 1:
+            final_ranking = rankings_by_text[0]
+        else:
+            final_ranking = reciprocal_rank_fusion(
+                [[chunk_id for chunk_id, _ in ranking] for ranking in rankings_by_text]
+            )
         retrieved = [
             chunks_by_id[chunk_id].model_copy(update={"score": fused_score})
-            for chunk_id, fused_score in fused_ranking[: self.retrieved_chunks]
+            for chunk_id, fused_score in final_ranking[: self.retrieved_chunks]
         ]
         logger.info(
-            "%s: retrieved %d chunks (%d by meaning, %d by keyword, %d found by both)",
+            "%s: retrieved %d chunks for %d search texts",
             prompt_id,
             len(retrieved),
-            len(by_meaning),
-            len(by_keyword),
-            len({chunk.chunk_id for chunk in by_meaning} & {c.chunk_id for c in by_keyword}),
+            len(unique_texts),
         )
         return retrieved
 
