@@ -11,7 +11,8 @@ call returns. A node is the only place that converts one into the other.
 
 Fields are added as the nodes that write them are built (DATABASE_SCHEMA.md):
 phase 1 has the topic, the sub-questions, the findings, and the draft; phase 3
-adds search_failures, and WebResearchTask, the input of one parallel branch.
+adds search_failures, and WebResearchTask, the input of one parallel branch;
+phase 4 adds DocumentResearchTask, the input of one document branch.
 """
 
 import operator
@@ -94,3 +95,16 @@ class WebResearchTask(TypedDict):
     """
 
     sub_question: SubQuestion
+
+
+class DocumentResearchTask(TypedDict):
+    """What one document_researcher branch receives (concept subgraph-wrapper, decision 4).
+
+    The sub-question and the run's document ids, nothing else: like a web
+    branch, it cannot read another branch's work. The ids are carried here,
+    not read from the run state, because a branch started by Send sees only
+    its own input.
+    """
+
+    sub_question: SubQuestion
+    document_ids: list[str]
