@@ -5,7 +5,7 @@ the wording of the tutorial version (`HuMzAHCodes/crag`, `self_rag/` file 7),
 which already worked on Mistral's small models. What each prompt keeps from
 it and what changed is in the concept notes; in short:
 
-    P-15 reword    the tutorial's retrieval-query rewrite, now run first, every time (D-53)
+    P-15 passage   a passage shaped like the answer, searched with the question (D-56)
     P-10 grade     its lenient, topic-level relevance rule, for all chunks in one call
     P-11 answer    its answer-from-context prompt, with the interpretive-words rule added
     P-12 IsSUP     its three levels and its interpretive-words rule, unchanged in spirit
@@ -31,7 +31,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 from graph.document_store import RetrievedChunk
 
-SEARCH_QUERY_PROMPT = ("P-15", "v1")
+SEARCH_PASSAGE_PROMPT = ("P-15", "v2")
 GRADING_PROMPT = ("P-10", "v1")
 ANSWER_PROMPT = ("P-11", "v1")
 SUPPORT_PROMPT = ("P-12", "v1")
@@ -44,46 +44,47 @@ MATERIAL_WARNING = (
 )
 
 # ---------------------------------------------------------------------------
-# P-15 Reword the sub-question into a search query
+# P-15 A passage shaped like the answer (HyDE), to search with
 # ---------------------------------------------------------------------------
 
-SEARCH_QUERY_SYSTEM = """You write search queries for finding answers in company documents
-(annual reports, filings, contracts). You are given a question; write the
-query that will find the passage answering it.
+# v2 (D-56). v1 asked for search words ("6 to 16 words, keep every name"). On
+# Voxtral Small it wrote "Symbotic Walmart revenue share", 4 words, and the
+# answer chunk ranked below 20; a stricter v1 draft fared no better (the
+# model kept the company name and the 4 words). Asked instead to write the
+# answer as the report would state it, it wrote "...approximately X% of our
+# total revenue was generated from...", which ranked the answer 1st. This is
+# HyDE (Gao et al., 2022): search with a made-up passage shaped like the
+# answer, since an answer resembles other answers more than it resembles the
+# question. The wording below is the one measured; change it only with a
+# new measurement and a new version.
+SEARCH_PASSAGE_SYSTEM = """Write one or two sentences as a company's annual report would state the
+answer to the question, in the report's own voice (we, our). You do not know
+the real figures: write them as placeholders such as X% or $X million. Do not
+add anything the question does not ask about."""
 
-Rules:
-- 6 to 16 words.
-- Keep every name, product, and number from the question.
-- Add 2 to 5 words the documents are likely to use for this subject, for
-  example revenue, customer, backlog, agreement, risk, expenses.
-- Leave out question words and filler (how, what, does, much, tell me).
-- Do not answer the question.
+SEARCH_PASSAGE_HUMAN = "Question: {question}"
 
-Example.
-Question: What does Contoso spend on research each year?
-Query: Contoso research and development expenses annual spending"""
+SEARCH_PASSAGE_RETRY = """
 
-SEARCH_QUERY_HUMAN = "Question: {question}"
-
-SEARCH_QUERY_RETRY = """
-
-The previous search query was: {previous_query}
-It did not find what the question asks for. Write a different query: other
-words the documents might use for the same subject."""
+A first passage was searched with and did not find the answer:
+{previous_passage}
+Write the answer again as a different part of the report would state it (a
+note to the financial statements, a risk factor, or a table), in other words."""
 
 
-def build_search_query_messages(
-    question: str, previous_query: str | None = None
+def build_search_passage_messages(
+    question: str, previous_passage: str | None = None
 ) -> list[BaseMessage]:
-    """P-15: the messages that reword a sub-question into a search query.
+    """P-15: the messages that ask for a passage shaped like the answer.
 
-    With previous_query, it is the one retry (decision 7): the model is told
-    the first query failed and asked for different words.
+    With previous_passage, it is the one retry (decision 7): the model is
+    shown the passage that failed and asked for one in other words. The
+    passage is only searched with, together with the question (D-56).
     """
-    human_text = SEARCH_QUERY_HUMAN.format(question=question)
-    if previous_query:
-        human_text += SEARCH_QUERY_RETRY.format(previous_query=previous_query)
-    return [SystemMessage(content=SEARCH_QUERY_SYSTEM), HumanMessage(content=human_text)]
+    human_text = SEARCH_PASSAGE_HUMAN.format(question=question)
+    if previous_passage:
+        human_text += SEARCH_PASSAGE_RETRY.format(previous_passage=previous_passage)
+    return [SystemMessage(content=SEARCH_PASSAGE_SYSTEM), HumanMessage(content=human_text)]
 
 
 # ---------------------------------------------------------------------------
