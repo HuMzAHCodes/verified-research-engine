@@ -12,8 +12,13 @@ test_graph.py, through the whole graph.
 
 import pytest
 
-from graph.mcp_client import SearchServerUnavailable, ToolCallError
-from graph.nodes.researcher import WebResearchFailed, research_check_node, web_researcher_node
+from graph.mcp_client import SearchHit, SearchServerUnavailable, ToolCallError
+from graph.nodes.researcher import (
+    WebResearchFailed,
+    page_identity,
+    research_check_node,
+    web_researcher_node,
+)
 from graph.state import SubQuestion
 from tests.conftest import FakeToolbox, ScriptedModel, search_hit, web_page
 
@@ -187,3 +192,55 @@ def test_no_web_sub_question_is_not_a_failure():
     document_question = SubQuestion(id="Q1", text="What does the report say?", route="document")
 
     assert research_check_node({"sub_questions": [document_question]}) == {}
+
+
+@pytest.mark.parametrize(
+    ("first_url", "second_url"),
+    [
+        # Seen in Phase 4: the same Yahoo article, plain and with ?fr=.
+        (
+            "https://finance.yahoo.com/news/symbotic-172009148.html",
+            "https://finance.yahoo.com/news/symbotic-172009148.html?fr=sycsrp_catchall",
+        ),
+        ("https://example.com/a?id=7&utm_source=x", "https://example.com/a?id=7"),
+        ("https://Example.com/a/", "https://example.com/a#section-2"),
+        ("https://example.com/a?b=2&a=1", "https://example.com/a?a=1&b=2"),
+    ],
+)
+def test_addresses_of_the_same_page_have_one_identity(first_url, second_url):
+    assert page_identity(first_url) == page_identity(second_url)
+
+
+@pytest.mark.parametrize(
+    ("first_url", "second_url"),
+    [
+        # A query that chooses the page is kept: these are two articles.
+        ("https://example.com/article?id=1", "https://example.com/article?id=2"),
+        ("https://finance.yahoo.com/news/a.html", "https://ca.finance.yahoo.com/news/a.html"),
+        ("https://example.com/a", "https://example.com/b"),
+    ],
+)
+def test_different_pages_keep_different_identities(first_url, second_url):
+    assert page_identity(first_url) != page_identity(second_url)
+
+
+async def test_the_same_page_under_two_addresses_is_read_once(make_gateway, caplog):
+    caplog.set_level("INFO")
+    page = web_page(1)
+    tracked_hit = SearchHit(title="Page 1 again", url=f"{page.url}?fr=sycsrp_catchall", snippet="")
+    toolbox = FakeToolbox(
+        hits_by_query={FIRST_QUESTION.text: [search_hit(1), tracked_hit, search_hit(2)]},
+        pages_by_url={web_page(n).url: web_page(n) for n in (1, 2)},
+    )
+
+    branch_update, _ = await run_branch(
+        make_gateway, toolbox, [p02_reply(copied_from(1), copied_from(2))], FIRST_QUESTION
+    )
+
+    # The first address, in rank order, is read; the copy is never fetched.
+    assert toolbox.received_urls == [search_hit(1).url, search_hit(2).url]
+    assert "the same page as an earlier hit" in caplog.text
+    assert [finding.locator for finding in branch_update["findings"]] == [
+        web_page(1).url,
+        web_page(2).url,
+    ]
