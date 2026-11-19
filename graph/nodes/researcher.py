@@ -23,6 +23,12 @@ rule ("every search failed means the web cannot be reached") needs every
 branch's result, so it lives in research_check_node, which runs once after
 all branches (parallel-fan-out, decision 3).
 
+Search hits that are one page under two addresses, differing only in
+tracking parameters, are read once (Phase 4, concept subgraph-wrapper, the
+live run: the same article came back plain and with "?fr=sycsrp_catchall",
+and became two findings, Q4-F1 and Q4-F2). Only known tracking parameters
+are ignored: other query strings can choose the page, so they are kept.
+
 The toolbox and the gateway are injected by build_graph (D-25), so tests pass
 FakeToolbox and ScriptedModel.
 """
@@ -33,6 +39,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from graph.extraction import extract_web_findings
 from graph.llm import ModelGateway
@@ -43,6 +50,30 @@ logger = logging.getLogger(__name__)
 
 SEARCH_RESULTS_PER_QUESTION = 5
 PAGES_PER_QUESTION = 3
+
+# Query parameters that only say where a click came from; the page is the same
+# with or without them. A list, not "drop every query string": on some sites
+# the query chooses the article (?id=123), so unknown parameters are kept.
+TRACKING_PARAMETERS = frozenset(
+    {
+        "fr",  # Yahoo search, seen in Phase 4: ?fr=sycsrp_catchall
+        "fbclid",
+        "gclid",
+        "msclkid",
+        "guccounter",
+        "guce_referrer",
+        "guce_referrer_sig",
+        "ncid",
+        "tsrc",
+        "yptr",
+        "mc_cid",
+        "mc_eid",
+        "ref_src",
+        "soc_src",
+        "soc_trk",
+    }
+)
+TRACKING_PARAMETER_PREFIXES = ("utm_",)
 
 # Routes that send a sub-question to the web. "both" also goes to the document
 # researcher from Phase 4; "document" alone does not search the web.
@@ -103,6 +134,48 @@ def research_check_node(state: Mapping[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def is_tracking_parameter(parameter_name: str) -> bool:
+    lowered_name = parameter_name.lower()
+    return lowered_name in TRACKING_PARAMETERS or lowered_name.startswith(
+        TRACKING_PARAMETER_PREFIXES
+    )
+
+
+def page_identity(url: str) -> str:
+    """The address of a page with what does not change the page left out.
+
+    Scheme and host in lower case, no fragment, no trailing slash on a path,
+    tracking parameters dropped, the other parameters kept in sorted order.
+    Used only to compare hits; the page is still read at the address given.
+    """
+    parts = urlsplit(url.strip())
+    kept_parameters = sorted(
+        (name, value)
+        for name, value in parse_qsl(parts.query, keep_blank_values=True)
+        if not is_tracking_parameter(name)
+    )
+    path = parts.path.rstrip("/") or "/"
+    return urlunsplit(
+        (parts.scheme.lower(), parts.netloc.lower(), path, urlencode(kept_parameters), "")
+    )
+
+
+def unique_hits(sub_question: SubQuestion, hits: list[SearchHit]) -> list[SearchHit]:
+    """The hits with each page once, keeping the first, in search-rank order."""
+    kept_hits: list[SearchHit] = []
+    seen_pages: set[str] = set()
+    for hit in hits:
+        identity = page_identity(hit.url)
+        if identity in seen_pages:
+            logger.info(
+                "%s: skipped %s (the same page as an earlier hit)", sub_question.id, hit.url
+            )
+            continue
+        seen_pages.add(identity)
+        kept_hits.append(hit)
+    return kept_hits
+
+
 async def research_sub_question(
     sub_question: SubQuestion, gateway: ModelGateway, toolbox: Toolbox
 ) -> SubQuestionResearch:
@@ -121,6 +194,7 @@ async def research_sub_question(
         logger.info("%s: search failed (%s)", sub_question.id, error)
         search_error = str(error)
         hits = []
+    hits = unique_hits(sub_question, hits)
     searched_at = time.perf_counter()
     pages = await read_pages(sub_question, hits, toolbox)
     read_at = time.perf_counter()
