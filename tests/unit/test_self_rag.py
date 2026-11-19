@@ -7,6 +7,9 @@ temporary folder. Each test scripts exactly the calls its path should make;
 ScriptedModel fails the test on any extra call, so a broken cap or an extra
 loop cannot pass.
 
+D-56: each pass searches with the question and a P-15 search passage (HyDE)
+together, in one embedding request; the passage is never answered from.
+
 TC-RES-10 (retrieval stays inside the run's documents) is checked here
 through the whole subgraph as well as in test_retrieval.py.
 """
@@ -22,8 +25,10 @@ from graph.self_rag.nodes import checked_quotes
 from tests.conftest import ScriptedEmbeddings, ScriptedModel
 
 QUESTION = "How much of Contoso's revenue comes from Northwind?"
-FIRST_QUERY = "Northwind share of Contoso total revenue"
-SECOND_QUERY = "Contoso largest customer revenue concentration"
+FIRST_PASSAGE = "Northwind accounted for approximately X% of our total revenue."
+SECOND_PASSAGE = "Revenue from our largest customer, Northwind, was X% of the total."
+# A passage with a figure the documents do not hold, to prove it goes nowhere.
+INVENTED_PASSAGE = "INVENTED-PASSAGE Northwind accounted for 99% of our total revenue."
 
 ANSWER_TEXT = "Northwind, our largest customer, accounted for 60% of our total revenue in 2025."
 BACKGROUND_TEXT = "We signed a new supply agreement with Northwind for warehouse systems."
@@ -77,7 +82,12 @@ def run_subgraph(make_gateway, store):
     async def run(scripted_replies, document_ids=("report",)):
         chat_model = ScriptedModel(scripted_replies=list(scripted_replies))
         embedding_model = ScriptedEmbeddings(
-            vectors_by_text={FIRST_QUERY: EAST, SECOND_QUERY: EAST, QUESTION: EAST}
+            vectors_by_text={
+                FIRST_PASSAGE: EAST,
+                SECOND_PASSAGE: EAST,
+                INVENTED_PASSAGE: EAST,
+                QUESTION: EAST,
+            }
         )
         gateway = make_gateway(decision_model=chat_model, embedding_model=embedding_model)
         self_rag_graph = build_self_rag_graph(gateway, HybridRetriever(store, gateway))
@@ -87,8 +97,8 @@ def run_subgraph(make_gateway, store):
     return run
 
 
-def search_query(query: str) -> dict:
-    return {"query": query}
+def search_passage(passage: str) -> dict:
+    return {"passage": passage}
 
 
 def relevant(*labels: str) -> dict:
@@ -121,7 +131,7 @@ def prompt_texts(chat_model: ScriptedModel) -> list[str]:
 async def test_the_best_path_answers_in_five_calls_and_one_embedding(run_subgraph):
     result, chat_model, embedding_model = await run_subgraph(
         [
-            search_query(FIRST_QUERY),
+            search_passage(FIRST_PASSAGE),
             relevant("C1", "C2"),
             draft("Northwind accounted for 60% of Contoso's total revenue in 2025."),
             support("fully_supported"),
@@ -130,17 +140,18 @@ async def test_the_best_path_answers_in_five_calls_and_one_embedding(run_subgrap
     )
 
     assert result.status == "answered"
-    assert result.search_queries == [FIRST_QUERY]
+    assert result.search_passages == [FIRST_PASSAGE]
     assert [chunk.text for chunk in result.evidence] == [ANSWER_TEXT, BACKGROUND_TEXT]
     assert len(chat_model.received_conversations) == 5
-    assert embedding_model.received_batches == [[FIRST_QUERY]]
+    # D-56: the question and the passage, embedded together in one request.
+    assert embedding_model.received_batches == [[QUESTION, FIRST_PASSAGE]]
 
 
-async def test_the_search_uses_the_reworded_query_not_the_question(run_subgraph):
-    # D-53: the sub-question is reworded before the first retrieval.
+async def test_the_search_uses_the_question_and_the_passage_together(run_subgraph):
+    # D-56: P-15 writes the passage from the question; both are searched.
     _, chat_model, embedding_model = await run_subgraph(
         [
-            search_query(FIRST_QUERY),
+            search_passage(FIRST_PASSAGE),
             relevant("C1"),
             draft("x"),
             support("fully_supported"),
@@ -149,13 +160,13 @@ async def test_the_search_uses_the_reworded_query_not_the_question(run_subgraph)
     )
 
     assert prompt_texts(chat_model)[0].endswith(f"Question: {QUESTION}")
-    assert embedding_model.received_batches == [[FIRST_QUERY]]
+    assert embedding_model.received_batches == [[QUESTION, FIRST_PASSAGE]]
 
 
 async def test_a_partly_supported_answer_is_revised_into_checked_quotes(run_subgraph):
     result, chat_model, _ = await run_subgraph(
         [
-            search_query(FIRST_QUERY),
+            search_passage(FIRST_PASSAGE),
             relevant("C1", "C2"),
             draft("Northwind is a strong, strategic customer providing 60% of revenue."),
             support("partially_supported"),
@@ -178,7 +189,7 @@ async def test_a_partly_supported_answer_is_revised_into_checked_quotes(run_subg
 async def test_a_revision_with_no_real_quote_ends_in_not_found(run_subgraph):
     result, chat_model, _ = await run_subgraph(
         [
-            search_query(FIRST_QUERY),
+            search_passage(FIRST_PASSAGE),
             relevant("C1"),
             draft("Northwind is a key partner."),
             support("no_support"),
@@ -194,9 +205,9 @@ async def test_a_revision_with_no_real_quote_ends_in_not_found(run_subgraph):
 async def test_nothing_relevant_searches_once_more_with_other_words(run_subgraph):
     result, chat_model, embedding_model = await run_subgraph(
         [
-            search_query(FIRST_QUERY),
+            search_passage(FIRST_PASSAGE),
             relevant(),
-            search_query(SECOND_QUERY),
+            search_passage(SECOND_PASSAGE),
             relevant("C1"),
             draft("Northwind accounted for 60% of total revenue."),
             support("fully_supported"),
@@ -205,15 +216,18 @@ async def test_nothing_relevant_searches_once_more_with_other_words(run_subgraph
     )
 
     assert result.status == "answered"
-    assert result.search_queries == [FIRST_QUERY, SECOND_QUERY]
-    # The second rewording is told which query failed.
-    assert f"The previous search query was: {FIRST_QUERY}" in prompt_texts(chat_model)[2]
-    assert embedding_model.received_batches == [[FIRST_QUERY], [SECOND_QUERY]]
+    assert result.search_passages == [FIRST_PASSAGE, SECOND_PASSAGE]
+    # The second passage is written knowing which one failed.
+    assert f"did not find the answer:\n{FIRST_PASSAGE}" in prompt_texts(chat_model)[2]
+    assert embedding_model.received_batches == [
+        [QUESTION, FIRST_PASSAGE],
+        [QUESTION, SECOND_PASSAGE],
+    ]
 
 
 async def test_nothing_relevant_twice_ends_in_not_found_after_four_calls(run_subgraph):
     result, chat_model, _ = await run_subgraph(
-        [search_query(FIRST_QUERY), relevant(), search_query(SECOND_QUERY), relevant()]
+        [search_passage(FIRST_PASSAGE), relevant(), search_passage(SECOND_PASSAGE), relevant()]
     )
 
     assert result.status == "not_found"
@@ -223,12 +237,12 @@ async def test_nothing_relevant_twice_ends_in_not_found_after_four_calls(run_sub
 async def test_a_not_useful_answer_searches_once_more(run_subgraph):
     result, chat_model, _ = await run_subgraph(
         [
-            search_query(FIRST_QUERY),
+            search_passage(FIRST_PASSAGE),
             relevant("C2"),
             draft("Contoso signed a supply agreement with Northwind."),
             support("fully_supported"),
             usefulness("not_useful"),
-            search_query(SECOND_QUERY),
+            search_passage(SECOND_PASSAGE),
             relevant("C1"),
             draft("Northwind accounted for 60% of total revenue."),
             support("fully_supported"),
@@ -237,7 +251,7 @@ async def test_a_not_useful_answer_searches_once_more(run_subgraph):
     )
 
     assert result.status == "answered"
-    assert result.search_queries == [FIRST_QUERY, SECOND_QUERY]
+    assert result.search_passages == [FIRST_PASSAGE, SECOND_PASSAGE]
     # The second pass starts clean: the evidence is from the second pass only.
     assert [chunk.text for chunk in result.evidence] == [ANSWER_TEXT]
     assert len(chat_model.received_conversations) == 10
@@ -246,12 +260,12 @@ async def test_a_not_useful_answer_searches_once_more(run_subgraph):
 async def test_not_useful_twice_ends_in_not_found(run_subgraph):
     result, _, _ = await run_subgraph(
         [
-            search_query(FIRST_QUERY),
+            search_passage(FIRST_PASSAGE),
             relevant("C2"),
             draft("An agreement was signed."),
             support("fully_supported"),
             usefulness("not_useful"),
-            search_query(SECOND_QUERY),
+            search_passage(SECOND_PASSAGE),
             relevant("C2"),
             draft("An agreement was signed."),
             support("fully_supported"),
@@ -266,13 +280,13 @@ async def test_the_one_revision_is_shared_by_both_passes(run_subgraph):
     # Pass 1 uses the revision; pass 2's unsupported answer cannot revise again.
     result, chat_model, _ = await run_subgraph(
         [
-            search_query(FIRST_QUERY),
+            search_passage(FIRST_PASSAGE),
             relevant("C2"),
             draft("A strategic agreement."),
             support("partially_supported"),
             quotes(BACKGROUND_TEXT),
             usefulness("not_useful"),
-            search_query(SECOND_QUERY),
+            search_passage(SECOND_PASSAGE),
             relevant("C1"),
             draft("A dominant customer."),
             support("partially_supported"),
@@ -294,7 +308,7 @@ async def test_no_documents_ends_at_once_without_a_call(run_subgraph):
 async def test_labels_the_model_was_not_given_are_dropped(run_subgraph):
     result, _, _ = await run_subgraph(
         [
-            search_query(FIRST_QUERY),
+            search_passage(FIRST_PASSAGE),
             relevant("C9", "c1"),  # C9 does not exist; c1 is C1 in another case
             draft("Northwind accounted for 60% of total revenue."),
             support("fully_supported"),
@@ -305,10 +319,10 @@ async def test_labels_the_model_was_not_given_are_dropped(run_subgraph):
     assert [chunk.text for chunk in result.evidence] == [ANSWER_TEXT]
 
 
-async def test_an_empty_search_query_falls_back_to_the_question(run_subgraph):
+async def test_an_empty_search_passage_falls_back_to_the_question(run_subgraph):
     result, _, embedding_model = await run_subgraph(
         [
-            search_query("   "),
+            search_passage("   "),
             relevant("C1"),
             draft("x"),
             support("fully_supported"),
@@ -316,7 +330,8 @@ async def test_an_empty_search_query_falls_back_to_the_question(run_subgraph):
         ]
     )
 
-    assert result.search_queries == [QUESTION]
+    assert result.search_passages == [QUESTION]
+    # The question is searched once, not twice.
     assert embedding_model.received_batches == [[QUESTION]]
 
 
@@ -325,7 +340,7 @@ async def test_tc_res_10_evidence_comes_only_from_the_documents_asked_for(run_su
 
     result, _, _ = await run_subgraph(
         [
-            search_query(FIRST_QUERY),
+            search_passage(FIRST_PASSAGE),
             relevant("C1", "C2", "C3"),
             draft("x"),
             support("fully_supported"),
@@ -339,7 +354,7 @@ async def test_tc_res_10_evidence_comes_only_from_the_documents_asked_for(run_su
 async def test_every_request_counts_against_the_runs_budget(make_gateway, store):
     chat_model = ScriptedModel(
         scripted_replies=[
-            search_query(FIRST_QUERY),
+            search_passage(FIRST_PASSAGE),
             relevant("C1"),
             draft("x"),
             support("fully_supported"),
@@ -348,7 +363,7 @@ async def test_every_request_counts_against_the_runs_budget(make_gateway, store)
     )
     gateway = make_gateway(
         decision_model=chat_model,
-        embedding_model=ScriptedEmbeddings(vectors_by_text={FIRST_QUERY: EAST}),
+        embedding_model=ScriptedEmbeddings(vectors_by_text={FIRST_PASSAGE: EAST, QUESTION: EAST}),
     )
     self_rag_graph = build_self_rag_graph(gateway, HybridRetriever(store, gateway))
     budget = ModelCallBudget(limit=30)
@@ -360,8 +375,29 @@ async def test_every_request_counts_against_the_runs_budget(make_gateway, store)
         None, config={"configurable": {MODEL_CALL_BUDGET_KEY: budget}}
     )
 
-    # Five chat calls and one embedding request.
+    # Five chat calls and one embedding request (question and passage together).
     assert budget.requests_sent == 6
+
+
+async def test_the_made_up_passage_is_only_searched_with_never_answered_from(run_subgraph):
+    # D-56 guard: the passage is invented by design. It may steer the search,
+    # but no later prompt sees it, and it never becomes the answer or evidence.
+    result, chat_model, _ = await run_subgraph(
+        [
+            search_passage(INVENTED_PASSAGE),
+            relevant("C1"),
+            draft("Northwind accounted for 60% of Contoso's total revenue in 2025."),
+            support("partially_supported"),
+            quotes(INVENTED_PASSAGE, ANSWER_TEXT),
+            usefulness("useful"),
+        ]
+    )
+
+    later_prompts = prompt_texts(chat_model)[1:]
+    assert not any("INVENTED-PASSAGE" in prompt for prompt in later_prompts)
+    # A quote copied from the passage is not in any chunk, so it is dropped.
+    assert result.answer == ANSWER_TEXT
+    assert not any("INVENTED-PASSAGE" in chunk.text for chunk in result.evidence)
 
 
 def test_checked_quotes_keeps_only_real_quotes_and_their_chunks(store):
