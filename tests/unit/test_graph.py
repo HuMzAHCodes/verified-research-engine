@@ -21,8 +21,7 @@ import pytest
 from graph.llm import MODEL_CALL_BUDGET_KEY, ModelCallBudget, ModelCallBudgetExceeded
 from graph.mcp_client import SearchHit, ToolCallError
 from graph.nodes.researcher import WebResearchFailed
-from graph.nodes.writer import WriterError
-from graph.supervisor import PHASE_TAG, build_graph, research_run_config
+from graph.supervisor import PHASE_TAG, build_graph, research_run_config, route_to_researchers
 from settings import settings
 from tests.conftest import FakeToolbox, ScriptedModel, search_hit, web_page
 
@@ -288,24 +287,12 @@ async def test_every_branch_failing_its_search_stops_the_run(make_gateway):
         await run_graph(graph)
 
 
-async def test_no_web_sub_question_reaches_the_next_node_instead_of_ending_silently(
-    make_gateway,
-):
-    # Decision 7. With documents uploaded the planner keeps a "document" route,
-    # so no web branch starts. The run must still go on: here it reaches the
-    # writer, which has no evidence to write from (the document researcher
-    # arrives in Phase 4). Without the fix the run would end with no error.
-    toolbox = FakeToolbox()
-    graph = build_graph(
-        make_gateway(
-            decision_model=ScriptedModel(scripted_replies=[plan(FIRST_QUESTION, route="document")])
-        ),
-        toolbox,
-    )
-
-    with pytest.raises(WriterError, match="no sub-question found any evidence"):
-        await run_graph(graph, document_ids=["annual-report.pdf"])
-    assert toolbox.received_queries == []
+def test_with_no_branch_to_start_the_run_goes_to_research_check():
+    # Decision 7. An empty Send list would end the run silently. In Phase 3 a
+    # plan of only "document" sub-questions started no branch; from Phase 4
+    # every route starts one (test_graph_documents.py), so this guard is
+    # checked on the routing function itself.
+    assert route_to_researchers({"sub_questions": [], "document_ids": []}) == "research_check"
 
 
 def test_research_run_config_names_tags_and_identifies_the_run():
@@ -315,7 +302,7 @@ def test_research_run_config_names_tags_and_identifies_the_run():
 
     assert run_config["run_name"] == "research-run"
     assert run_config["run_id"] == run_id
-    assert run_config["tags"] == [PHASE_TAG] == ["phase-3"]
+    assert run_config["tags"] == [PHASE_TAG] == ["phase-4"]
     assert run_config["metadata"] == {"topic": TOPIC}
 
 
@@ -364,7 +351,7 @@ async def test_a_run_that_uses_up_its_budget_stops(make_gateway):
     # Room for the planner and both P-02 calls, not for the writer.
     run_config["configurable"][MODEL_CALL_BUDGET_KEY] = ModelCallBudget(limit=3)
 
-    with pytest.raises(ModelCallBudgetExceeded, match="VRE_MAX_MODEL_CALLS_PER_RUN=3"):
+    with pytest.raises(ModelCallBudgetExceeded, match=r"the most it may send \(3: sized"):
         await two_question_graph(make_gateway).ainvoke(
             {"topic": TOPIC, "document_ids": []}, config=run_config
         )
