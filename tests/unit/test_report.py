@@ -82,3 +82,35 @@ def test_a_title_that_already_ends_a_sentence_gets_no_extra_full_stop():
     assert "Is Symbotic a buy? <" in brief
     assert "Untitled. <" in brief
     assert ".." not in brief
+
+
+def test_sources_follow_the_order_of_first_citation():
+    # CONCEPT: tracing-from-day-one, outside test review at the Phase 4 close
+    # (F-19): the outline put Customers first, so its source comes first.
+    draft = [
+        Section(title="Customers", text="A retailer. [Q2-F1]"),
+        Section(title="Products", text="Robots. [Q1-F1]"),
+    ]
+
+    brief = render_brief(TOPIC, draft, FINDINGS)
+
+    assert brief.index("- **[Q2-F1]**") < brief.index("- **[Q1-F1]**")
+
+
+def test_a_page_title_cannot_add_markdown_to_the_brief():
+    # CONCEPT: tracing-from-day-one, outside test review F-24: a title cannot
+    # add a link, and an address cannot end its <...> early.
+    finding = web_finding("Q1-F1").model_copy(
+        update={
+            "title": "Read more](https://attacker.example/) [x *bold*",
+            "locator": "https://example.com/a>b c",
+        }
+    )
+
+    brief = render_brief(TOPIC, [Section(title="P", text="Robots. [Q1-F1]")], [finding])
+
+    source_line = brief.splitlines()[-1]
+    assert source_line == (
+        "- **[Q1-F1]** Read more\\](https://attacker.example/) \\[x \\*bold\\*. "
+        "<https://example.com/a%3Eb%20c>"
+    )
