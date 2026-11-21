@@ -6,10 +6,15 @@ writes it from that section's findings only. One job per call (rule G-4).
 
 Source text goes inside <passage> tags, and the prompt says it is material to
 read, not instructions to follow (rule G-6): a web page can contain text
-written to redirect a model.
+written to redirect a model. Text from a page, a document, or a model (the
+passage, the answer, the source title and locator) cannot open or close a
+finding or passage tag: those are neutralised, as P-02 and the Self-RAG
+prompts neutralise theirs (outside test review at the Phase 4 close, F-2).
 
 Raise the version whenever the wording changes, and log it in PROMPTS.md.
 """
+
+import re
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
@@ -53,6 +58,15 @@ SECTION_HUMAN = """Section title: {title}
 
 Findings:
 {finding_blocks}"""
+
+
+# "<finding", "</finding", "<passage", or "</passage", in any letter case.
+FINDING_TAG_PATTERN = re.compile(r"<(/?(?:finding|passage))", re.IGNORECASE)
+
+
+def neutralise_finding_tags(text: str) -> str:
+    """Turn finding and passage tags inside text into harmless text ("&lt;passage")."""
+    return FINDING_TAG_PATTERN.sub(r"&lt;\1", text)
 
 
 def build_outline_messages(
@@ -103,8 +117,14 @@ def format_finding_block(finding: Finding) -> str:
     """
     block_lines = [f'<finding id="{finding.id}" source="{finding.source_type}">']
     if finding.answer:
-        block_lines.append(f"Answer: {finding.answer}")
+        block_lines.append(f"Answer: {neutralise_finding_tags(finding.answer)}")
     if finding.title or finding.locator:
-        block_lines.append(f"Source: {finding.title} ({finding.locator})".strip())
-    block_lines += ["<passage>", finding.passage, "</passage>", "</finding>"]
+        source_line = f"Source: {finding.title} ({finding.locator})".strip()
+        block_lines.append(neutralise_finding_tags(source_line))
+    block_lines += [
+        "<passage>",
+        neutralise_finding_tags(finding.passage),
+        "</passage>",
+        "</finding>",
+    ]
     return "\n".join(block_lines)
