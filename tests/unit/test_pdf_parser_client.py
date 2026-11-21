@@ -116,3 +116,15 @@ async def test_a_server_that_stops_answering_is_unavailable():
         await pdf_parser.ingest_pdf("data/uploads/report.pdf", "doc-1")
     with pytest.raises(PdfParserUnavailable, match="stopped answering during pdf://doc-1/page/1"):
         await pdf_parser.read_page("doc-1", 1)
+
+
+async def test_a_token_in_the_server_address_never_reaches_the_error():
+    # CONCEPT: pdf-parser-mcp, D-63 (outside test review at the Phase 4 close,
+    # F-21): the address is named without its user, password, or query.
+    with pytest.raises(PdfParserUnavailable) as error_info:
+        async with PdfParserClient.connect(
+            "http://user:s3cret-token@127.0.0.1:9/mcp?token=s3cret-token", call_timeout_seconds=2
+        ) as pdf_parser:
+            await pdf_parser.read_page("doc-1", 1)
+    assert "s3cret-token" not in str(error_info.value)
+    assert "http://127.0.0.1:9/mcp" in str(error_info.value)
