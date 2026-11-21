@@ -5,13 +5,19 @@ step can fail on a real web page, so every failure becomes PageFetchError
 with a reason the researcher can log before skipping the page:
 
 1. the address is checked (url_safety.py), and checked again on every redirect;
-2. the download is limited in time, size, and redirects;
-3. only HTML and plain-text pages are read;
+2. the download is limited in size and redirects, and the download and the
+   text extraction together are limited in time;
+3. only HTML and plain-text pages are read, in the charset the server declares;
 4. trafilatura keeps the main text and drops menus, footers, and ads;
 5. the text is cut to max_chars, and truncated says whether it was.
+
+The time limit covers extraction too (outside test review at the Phase 4
+close, F-22): a page trafilatura takes a long time over is one skipped page,
+not a tool call that outlasts the client's own limit and stops the run.
 """
 
 import asyncio
+import codecs
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from urllib.parse import urljoin, urlsplit
@@ -77,9 +83,20 @@ async def fetch_readable_page(
     """Fetch one page and return its main text. Tests pass a fake resolver and transport."""
     try:
         async with asyncio.timeout(limits.timeout_seconds):
-            final_url, content_type, body = await download_within_limits(
+            final_url, content_type, body, declared_charset = await download_within_limits(
                 url, limits, resolver, transport
             )
+            page_text = decode_body(body, declared_charset)
+            if content_type == "text/plain":
+                main_text, page_title = page_text.strip(), ""
+            else:
+                # trafilatura is synchronous and CPU-bound: run it in a worker
+                # thread so the server keeps answering other calls meanwhile. A
+                # thread cannot be stopped, so on a timeout it finishes unseen,
+                # but the call returns at the limit.
+                main_text, page_title = await asyncio.to_thread(extract_main_text, page_text)
+                if len(main_text) < MIN_MAIN_TEXT_CHARS:
+                    main_text = ""
     except TimeoutError as error:
         raise PageFetchError(
             f"timed out after {limits.timeout_seconds:.0f} s: {host_of(url)}"
@@ -89,15 +106,6 @@ async def fetch_readable_page(
     except httpx.HTTPError as error:
         raise PageFetchError(f"could not fetch {host_of(url)}: {type(error).__name__}") from error
 
-    page_text = body.decode("utf-8", errors="replace")
-    if content_type == "text/plain":
-        main_text, page_title = page_text.strip(), ""
-    else:
-        # trafilatura is synchronous and CPU-bound: run it in a worker thread
-        # so the server keeps answering other calls meanwhile.
-        main_text, page_title = await asyncio.to_thread(extract_main_text, page_text)
-        if len(main_text) < MIN_MAIN_TEXT_CHARS:
-            main_text = ""
     if not main_text:
         raise PageFetchError(f"no readable text on {host_of(final_url)}")
 
@@ -109,13 +117,31 @@ async def fetch_readable_page(
     )
 
 
+def decode_body(body: bytes, declared_charset: str | None) -> str:
+    """The body as text, in the charset the server declared, or UTF-8 if none or unknown.
+
+    Outside test review F-13: a page always read as UTF-8 turned every accented
+    letter of an ISO-8859 or Windows-1252 page into a replacement character.
+    """
+    charset = "utf-8"
+    if declared_charset:
+        try:
+            charset = codecs.lookup(declared_charset).name
+        except LookupError:
+            pass  # a charset Python does not know: UTF-8, with replacements
+    return body.decode(charset, errors="replace")
+
+
 async def download_within_limits(
     url: str,
     limits: FetchLimits,
     resolver: HostResolver,
     transport: httpx.AsyncBaseTransport | None,
-) -> tuple[str, str, bytes]:
-    """Follow redirects by hand, checking each address, and stop reading at max_bytes."""
+) -> tuple[str, str, bytes, str | None]:
+    """Follow redirects by hand, checking each address, and stop reading at max_bytes.
+
+    Returns the final url, the content type, the body, and the declared charset.
+    """
     async with httpx.AsyncClient(
         transport=transport,
         follow_redirects=False,  # every redirect must pass the address check first
@@ -143,7 +169,7 @@ async def download_within_limits(
                     shown_type = content_type or "no content type"
                     raise PageFetchError(f"not a text page ({shown_type}): {host_of(current_url)}")
                 body = await read_at_most(response, limits.max_bytes)
-                return current_url, content_type, body
+                return current_url, content_type, body, response.charset_encoding
         raise PageFetchError(f"more than {limits.max_redirects} redirects from {host_of(url)}")
 
 
