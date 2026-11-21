@@ -6,16 +6,23 @@ pack's contents and its safety: which files go in, how each test is listed,
 how the coverage table reads, and that a key stops the build.
 """
 
+import pytest
+
 from scripts.make_review_pack import (
     INCLUDED_FILES,
+    PART_LIMIT_BYTES,
+    SHARED_PATHS,
+    area_of,
     coverage_rows,
     inventory_of_tests,
     line_ranges,
     module_summary,
     pack_paths,
     project_description,
-    render_all_files,
+    render_part,
+    render_parts,
     secrets_found,
+    split_into_parts,
 )
 
 # Built at run time so this file never holds a key-shaped string (TC-NFR-09).
@@ -197,6 +204,25 @@ def test_a_module_marked_live_marks_every_test_live():
     assert [entry.live for entry in entries] == [True]
 
 
+def test_the_live_marker_inside_a_string_does_not_mark_the_module():
+    source = 'EXAMPLE = "pytestmark = pytest.mark.live"\n\n\ndef test_one():\n    pass\n'
+
+    _, entries = inventory_of_tests(source)
+
+    assert [entry.live for entry in entries] == [False]
+
+
+def test_a_list_of_marks_with_live_marks_the_module():
+    source = (
+        "import pytest\n\npytestmark = [pytest.mark.live, pytest.mark.slow]\n\n\n"
+        "def test_one():\n    pass\n"
+    )
+
+    _, entries = inventory_of_tests(source)
+
+    assert [entry.live for entry in entries] == [True]
+
+
 def test_a_key_shaped_string_or_a_real_key_value_stops_the_build():
     texts = {
         "graph/clean.py": "print('nothing secret here')",
@@ -230,10 +256,70 @@ def test_the_project_description_is_the_first_plain_paragraph():
     assert project_description("# Only a heading") == ""
 
 
-def test_a_file_holding_a_code_fence_gets_a_longer_fence():
-    all_files = render_all_files(
-        {"README.md": "Run:\n```\nuv sync\n```\n", "graph/a.py": "x = 1\n"}
+def test_code_goes_to_the_same_part_as_its_tests():
+    assert area_of("mcp_servers/search_mcp/url_safety.py") == "web"
+    assert area_of("tests/unit/test_url_safety.py") == "web"
+    assert area_of("graph/self_rag/nodes.py") == "documents"
+    assert area_of("tests/unit/test_self_rag_prompts.py") == "documents"
+    assert area_of("app/ingestion.py") == "documents"
+    assert area_of("graph/run_budget.py") == "graph"
+    assert area_of("tests/unit/test_graph_documents.py") == "graph"
+    # Anything no area names goes to the last one.
+    assert area_of("graph/llm.py") == "core"
+    assert area_of("graph/a_new_module.py") == "core"
+
+
+def test_every_file_is_in_exactly_one_part_and_the_helpers_in_all():
+    paths = [
+        "graph/llm.py",
+        "graph/retrieval.py",
+        "mcp_servers/search_mcp/fetch.py",
+        "settings.py",
+        *SHARED_PATHS,
+    ]
+
+    parts = split_into_parts(paths)
+
+    assert list(parts) == ["web", "documents", "core"]
+    for part_paths in parts.values():
+        assert part_paths[: len(SHARED_PATHS)] == list(SHARED_PATHS)
+    not_shared = [path for part in parts.values() for path in part if path not in SHARED_PATHS]
+    assert sorted(not_shared) == sorted(set(paths) - set(SHARED_PATHS))
+
+
+def test_an_area_with_no_files_of_its_own_gets_no_part():
+    parts = split_into_parts(["graph/llm.py", "tests/conftest.py"])
+
+    assert list(parts) == ["core"]
+
+
+def test_a_part_ends_with_a_line_that_names_it_and_counts_its_files():
+    part = render_part(
+        {"README.md": "Run:\n```\nuv sync\n```\n", "graph/a.py": "x = 1\n"},
+        number=2,
+        part_count=3,
+        title="an area",
     )
 
-    assert "## `README.md`\n\n````\nRun:\n```\nuv sync\n```\n````" in all_files
-    assert "## `graph/a.py`\n\n```python\nx = 1\n```" in all_files
+    assert part.startswith("# Review files, part 2 of 3: an area\n")
+    assert part.rstrip().splitlines()[-1] == "End of part 2 of 3: 2 files."
+    # A file holding a code fence gets a longer fence, so it cannot end the block early.
+    assert "## `README.md`\n\n````\nRun:\n```\nuv sync\n```\n````" in part
+    assert "## `graph/a.py`\n\n```python\nx = 1\n```" in part
+
+
+def test_parts_are_numbered_in_order_and_named_by_area():
+    parts = render_parts(
+        {"graph/llm.py": "a = 1\n", "app/ingestion.py": "b = 2\n", "tests/conftest.py": "c\n"}
+    )
+
+    assert list(parts) == ["FILES_1_documents.md", "FILES_2_core.md"]
+    assert parts["FILES_1_documents.md"].rstrip().endswith("End of part 1 of 2: 2 files.")
+    assert "## `tests/conftest.py`" in parts["FILES_2_core.md"]
+
+
+def test_a_part_over_the_limit_stops_the_build():
+    oversized = "x" * (PART_LIMIT_BYTES + 1)
+
+    with pytest.raises(SystemExit, match="FILES_1_core.md is .* KB, over the"):
+        render_parts({"graph/llm.py": oversized})
