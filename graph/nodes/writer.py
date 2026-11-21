@@ -102,38 +102,64 @@ def check_outline(
 ) -> list[OutlineSection]:
     """Enforce in code what P-03 only asks for.
 
-    1. Ids that are not sub-questions with evidence are removed from a section.
+    1. Ids that are not sub-questions with evidence are removed from a section,
+       and an id listed twice in one section is kept once.
     2. A section left with no ids is dropped: it has nothing to cite.
-    3. A sub-question with evidence that no section covers gets its own
-       section at the end, titled with its question.
+    3. At most one section per sub-question: the run's budget (D-58) allows
+       1 + len(sub_questions) writer calls. Sections past that are dropped.
+    4. A sub-question with evidence that no section covers gets its own
+       section at the end, titled with its question; with no room left, it
+       joins the last section.
+
+    Rules 1 and 3 came from the outside test review at the Phase 4 close
+    (F-3): a preferred format with more sections than sub-questions ran out
+    of budget at the last section call, after all the research was done.
     """
+    max_sections = len(sub_questions)
     checked_sections: list[OutlineSection] = []
     for outline_section in outline_sections:
-        kept_ids = [
-            question_id
-            for question_id in outline_section.sub_question_ids
-            if question_id in findings_by_question
-        ]
-        if len(kept_ids) < len(outline_section.sub_question_ids):
+        kept_ids = list(
+            dict.fromkeys(
+                question_id
+                for question_id in outline_section.sub_question_ids
+                if question_id in findings_by_question
+            )
+        )
+        removed_ids = sorted(set(outline_section.sub_question_ids) - set(kept_ids))
+        if removed_ids or len(kept_ids) < len(outline_section.sub_question_ids):
             logger.warning(
-                "outline section %r: removed ids %s",
+                "outline section %r: removed ids %s, duplicates kept once",
                 outline_section.title,
-                sorted(set(outline_section.sub_question_ids) - set(kept_ids)),
+                removed_ids,
             )
         if kept_ids:
             checked_sections.append(
                 outline_section.model_copy(update={"sub_question_ids": kept_ids})
             )
+    if len(checked_sections) > max_sections:
+        logger.warning(
+            "outline has %d sections; keeping the first %d, one per sub-question",
+            len(checked_sections),
+            max_sections,
+        )
+        checked_sections = checked_sections[:max_sections]
 
     covered_ids = {
         question_id for section in checked_sections for question_id in section.sub_question_ids
     }
     for sub_question in sub_questions:
         if sub_question.id in findings_by_question and sub_question.id not in covered_ids:
-            logger.warning("outline missed %s; adding a section for it", sub_question.id)
-            checked_sections.append(
-                OutlineSection(title=sub_question.text, sub_question_ids=[sub_question.id])
-            )
+            if len(checked_sections) < max_sections:
+                logger.warning("outline missed %s; adding a section for it", sub_question.id)
+                checked_sections.append(
+                    OutlineSection(title=sub_question.text, sub_question_ids=[sub_question.id])
+                )
+            else:
+                logger.warning("outline missed %s; adding it to the last section", sub_question.id)
+                last_section = checked_sections[-1]
+                checked_sections[-1] = last_section.model_copy(
+                    update={"sub_question_ids": [*last_section.sub_question_ids, sub_question.id]}
+                )
     return checked_sections
 
 
