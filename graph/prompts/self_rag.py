@@ -83,7 +83,9 @@ def build_search_passage_messages(
     """
     human_text = SEARCH_PASSAGE_HUMAN.format(question=question)
     if previous_passage:
-        human_text += SEARCH_PASSAGE_RETRY.format(previous_passage=previous_passage)
+        human_text += SEARCH_PASSAGE_RETRY.format(
+            previous_passage=neutralise_chunk_tags(previous_passage)
+        )
     return [SystemMessage(content=SEARCH_PASSAGE_SYSTEM), HumanMessage(content=human_text)]
 
 
@@ -100,7 +102,13 @@ CHUNK_TAG_PATTERN = re.compile(r"<(/?chunk)", re.IGNORECASE)
 
 
 def neutralise_chunk_tags(chunk_text: str) -> str:
-    """Turn "<chunk" and "</chunk" inside a chunk into harmless text ("&lt;chunk")."""
+    """Turn "<chunk" and "</chunk" into harmless text ("&lt;chunk").
+
+    Used on chunk text, and on every other text put near the chunk blocks
+    that a document or a model wrote: P-11's answer in P-12 and P-13, and the
+    first passage in P-15's retry (outside test review at the Phase 4 close,
+    F-9: an answer steered by a chunk could add a chunk of its own).
+    """
     return CHUNK_TAG_PATTERN.sub(r"&lt;\1", chunk_text)
 
 
@@ -224,7 +232,9 @@ def build_support_messages(
         SystemMessage(content=SUPPORT_SYSTEM),
         HumanMessage(
             content=SUPPORT_HUMAN.format(
-                question=question, answer=answer, chunk_blocks=chunk_blocks(labelled_chunks)
+                question=question,
+                answer=neutralise_chunk_tags(answer),
+                chunk_blocks=chunk_blocks(labelled_chunks),
             )
         ),
     ]
@@ -258,7 +268,9 @@ def build_revision_messages(
         SystemMessage(content=REVISION_SYSTEM),
         HumanMessage(
             content=REVISION_HUMAN.format(
-                question=question, answer=answer, chunk_blocks=chunk_blocks(labelled_chunks)
+                question=question,
+                answer=neutralise_chunk_tags(answer),
+                chunk_blocks=chunk_blocks(labelled_chunks),
             )
         ),
     ]
