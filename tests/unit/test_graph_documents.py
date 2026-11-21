@@ -18,7 +18,13 @@ from uuid import uuid4
 
 import pytest
 
-from graph.document_store import DocumentStore, StoredChunk, StoredDocument, chunk_id_for
+from graph.document_store import (
+    DocumentNotStored,
+    DocumentStore,
+    StoredChunk,
+    StoredDocument,
+    chunk_id_for,
+)
 from graph.llm import MODEL_CALL_BUDGET_KEY
 from graph.mcp_client import ToolCallError
 from graph.nodes.researcher import WebResearchFailed
@@ -269,3 +275,22 @@ def test_routes_send_web_first_then_document_for_a_both_question():
     # also the run's document ids.
     assert set(sends[0].arg) == {"sub_question"}
     assert sends[3].arg["document_ids"] == ["d1"]
+
+
+async def test_a_document_that_is_not_stored_is_refused_before_any_model_request(
+    make_gateway, tmp_path
+):
+    # CONCEPT: subgraph-wrapper, outside test review at the Phase 4 close (F-5).
+    store = DocumentStore(tmp_path / "vectors")
+    save_document(store)
+    decision_model = ScriptedModel()  # any call at all fails the test
+    graph = build_graph(
+        make_gateway(decision_model=decision_model), FakeToolbox(), document_store=store
+    )
+
+    with pytest.raises(DocumentNotStored, match="not in the document store: never-ingested"):
+        await graph.ainvoke(
+            {"topic": TOPIC, "document_ids": [DOCUMENT_ID, "never-ingested"]},
+            config=research_run_config(TOPIC, uuid4()),
+        )
+    assert decision_model.received_conversations == []
