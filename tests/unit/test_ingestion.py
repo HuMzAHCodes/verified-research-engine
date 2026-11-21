@@ -12,6 +12,7 @@ nothing, and the error names the document.
 
 import pytest
 
+import graph.document_store
 import graph.llm
 from app.ingestion import (
     CHUNK_MAX_CHARS,
@@ -191,3 +192,24 @@ async def test_two_different_files_become_two_documents_with_their_own_ids(
     # Each document's search finds only its own text.
     (first_hit,) = store.search([first_document.document_id], scripted_vector("Beta text."), k=5)
     assert first_hit.text == "Alpha text."
+
+
+async def test_a_store_write_that_fails_is_an_ingestion_error(
+    make_service, store, uploads_folder, pages_by_path, monkeypatch
+):
+    # CONCEPT: document-ingestion, outside test review at the Phase 4 close
+    # (F-16): a failed write reaches the caller as IngestionError naming the
+    # file, not as a bare OSError, and leaves nothing in the store.
+    pdf_path = write_upload(uploads_folder, "report.pdf", b"%PDF- report bytes")
+    pages_by_path[str(pdf_path)] = ["Alpha text on the only page of this report."]
+
+    def failing_write_index(vector_index, path):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(graph.document_store.faiss, "write_index", failing_write_index)
+
+    with pytest.raises(
+        IngestionError, match="report.pdf: ingestion stopped and nothing was stored: disk full"
+    ):
+        await make_service(ScriptedEmbeddings()).ingest(pdf_path)
+    assert not store.vectors_dir.exists() or list(store.vectors_dir.iterdir()) == []
