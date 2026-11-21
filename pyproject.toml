@@ -27,6 +27,7 @@ dev = [
     "nbstripout>=0.9.1",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
     "ruff>=0.17.1",
 ]
 
@@ -39,6 +40,16 @@ extend-exclude = ["docs"]
 # E, F: errors and undefined names. I: import order. B: likely bugs.
 # UP: modern Python syntax for 3.12.
 select = ["E", "F", "I", "B", "UP"]
+
+[tool.coverage.run]
+# The outside test review (phase close, D-60): which lines and branches of the
+# project's own code no scripted test runs. Tests are not measured.
+source = ["graph", "app", "mcp_servers", "settings"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
 
 [tool.pytest.ini_options]
 # Run from the project root so `from settings import settings` and
