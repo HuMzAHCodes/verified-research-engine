@@ -6,7 +6,7 @@ tests/pdf_fixtures.py into a temporary allowed folder.
 """
 
 import pytest
-from pypdf import PdfReader, PdfWriter
+from pypdf import PageObject, PdfReader, PdfWriter
 
 from mcp_servers.pdf_parser_mcp.reading import PdfLimits, PdfReadError, read_pdf_pages
 from tests.pdf_fixtures import make_pdf, write_pdf
@@ -104,3 +104,22 @@ def test_a_pdf_with_no_text_gives_only_empty_pages(uploads_folder, limits):
     pdf_path = write_pdf(uploads_folder, "scanned.pdf", ["", ""])
 
     assert read_pdf_pages(str(pdf_path), limits) == ["", ""]
+
+
+def test_one_unreadable_page_keeps_its_place(uploads_folder, limits, monkeypatch, caplog):
+    # CONCEPT: pdf-parser-mcp, decision 3, outside test review at the Phase 4
+    # close (F-23): a page the library fails on is read as empty and logged, so
+    # every later page keeps its number (TC-DOC-02 relies on it).
+    pdf_path = write_pdf(uploads_folder, "report.pdf", ["alpha", "beta", "gamma"])
+    original_extract_text = PageObject.extract_text
+
+    def extract_or_fail(page, *args, **kwargs):
+        page_text = original_extract_text(page, *args, **kwargs)
+        if page_text == "beta":
+            raise ValueError("bad content stream")
+        return page_text
+
+    monkeypatch.setattr(PageObject, "extract_text", extract_or_fail)
+
+    assert read_pdf_pages(str(pdf_path), limits) == ["alpha", "", "gamma"]
+    assert "report.pdf, page 2: no text read (bad content stream)" in caplog.text
