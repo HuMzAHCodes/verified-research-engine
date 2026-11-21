@@ -262,18 +262,57 @@ class SlowEmbeddings(ScriptedEmbeddings):
             self.batches_waiting -= 1
 
 
+class LastBatchFirstEmbeddings(ScriptedEmbeddings):
+    """The first batch waits until the last batch has finished: the order is set by an event.
+
+    Outside test review at the Phase 4 close (F-15): the test this replaces
+    set the order with sleeps of 0.3, 0.15, and 0 s under a limiter that
+    releases a batch about every 0.1 s, a margin a busy machine could lose.
+    """
+
+    def __init__(self, first_text: str, last_text: str) -> None:
+        super().__init__()
+        self.first_text = first_text
+        self.last_text = last_text
+        self.last_batch_done = asyncio.Event()
+        self.completed_batches: list[list[str]] = []
+
+    async def aembed_documents(self, texts: list[str]) -> list[list[float]]:
+        if texts[0] == self.first_text:
+            # A time limit, so a broken gateway fails the test instead of hanging it.
+            await asyncio.wait_for(self.last_batch_done.wait(), timeout=5)
+        vectors = await super().aembed_documents(texts)
+        self.completed_batches.append(list(texts))
+        if texts[0] == self.last_text:
+            self.last_batch_done.set()
+        return vectors
+
+
 async def test_replies_that_finish_out_of_order_come_back_in_order(make_gateway):
     texts = chunk_texts(6)
-    # The first batch is the slowest, the last the fastest.
-    embedding_model = SlowEmbeddings(
-        delay_seconds_by_first_text={texts[0]: 0.3, texts[2]: 0.15, texts[4]: 0.0}
-    )
+    embedding_model = LastBatchFirstEmbeddings(first_text=texts[0], last_text=texts[4])
     gateway = make_gateway(embedding_model=embedding_model, embed_batch_size=2)
 
     vectors = await gateway.embed(texts, prompt_id=PROMPT_ID)
 
-    assert embedding_model.completed_batches[0] == texts[4:]  # finished first
+    finish_order = embedding_model.completed_batches
+    # Only this order is fixed; when the middle batch finishes depends on when
+    # the limiter releases it (asserting it last failed 1 run in 9).
+    assert finish_order.index(texts[4:]) < finish_order.index(texts[:2])  # last before first
     assert vectors == [scripted_vector(text) for text in texts]  # still in order
+
+
+async def test_a_dropped_connection_resends_the_same_batch(make_gateway, recorded_waits):
+    # CONCEPT: document-ingestion, outside test review F-7: a network blip on
+    # an embedding request is retried with the same texts.
+    embedding_model = ScriptedEmbeddings(scripted_failures=[httpx.ConnectError("reset")])
+    texts = chunk_texts(2)
+
+    vectors = await make_gateway(embedding_model=embedding_model).embed(texts, prompt_id=PROMPT_ID)
+
+    assert embedding_model.received_batches == [texts, texts]
+    assert vectors == [scripted_vector(text) for text in texts]
+    assert len(recorded_waits) == 1
 
 
 async def test_no_more_than_three_batches_wait_at_once(make_gateway):
