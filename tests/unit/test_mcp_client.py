@@ -19,6 +19,7 @@ from graph.mcp_client import (
     SearchServerUnavailable,
     ToolCallError,
     WebPage,
+    address_without_secrets,
 )
 from mcp_servers.search_mcp.fetch import FetchedPage, PageFetchError
 from mcp_servers.search_mcp.search import SearchResult
@@ -123,3 +124,64 @@ async def test_a_server_that_stops_answering_hits_the_time_limit():
     async with McpToolbox.connect(stand_in_server, call_timeout_seconds=0.3) as toolbox:
         with pytest.raises(SearchServerUnavailable, match="stopped answering during web_search"):
             await toolbox.search("anything")
+
+
+async def test_a_fetch_result_with_the_wrong_shape_stops_the_run():
+    # CONCEPT: mcp-client, outside test review at the Phase 4 close (F-11): the
+    # existing wrong-shape test reached only web_search.
+    async def web_search(query: str, max_results: int = 5) -> list[dict]:
+        return []
+
+    async def fetch_page(url: str, max_chars: int = 6_000) -> dict:
+        return {"text": "no url, title, or truncated"}
+
+    stand_in_server = server_with_tools(web_search=web_search, fetch_page=fetch_page)
+    async with McpToolbox.connect(stand_in_server) as toolbox:
+        with pytest.raises(SearchServerUnavailable, match="unexpected result for fetch_page"):
+            await toolbox.fetch("https://example.com/a")
+
+
+async def test_a_tool_with_no_structured_result_stops_the_run():
+    # A tool with no return type gives no structured content (checked on FastMCP).
+    async def web_search(query: str, max_results: int = 5):
+        return "plain words, not a list of hits"
+
+    async def fetch_page(url: str, max_chars: int = 6_000) -> dict:
+        return {}
+
+    stand_in_server = server_with_tools(web_search=web_search, fetch_page=fetch_page)
+    async with McpToolbox.connect(stand_in_server) as toolbox:
+        with pytest.raises(SearchServerUnavailable, match="web_search: no structured content"):
+            await toolbox.search("anything")
+
+
+@pytest.mark.parametrize(
+    ("address", "shown"),
+    [
+        ("http://127.0.0.1:8001/mcp", "http://127.0.0.1:8001/mcp"),
+        (
+            "https://user:s3cret-token@search.example/mcp?token=s3cret-token#part",
+            "https://search.example/mcp",
+        ),
+        ("http://[::1]:8001/mcp", "http://[::1]:8001/mcp"),
+        ("not an address", "the configured address"),
+        ("http://host:not-a-port/mcp", "the configured address"),
+    ],
+)
+def test_an_address_is_shown_without_its_secrets(address, shown):
+    # CONCEPT: mcp-client, D-63 (outside test review F-21).
+    assert address_without_secrets(address) == shown
+
+
+async def test_a_token_in_the_server_address_never_reaches_the_error():
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        free_port = probe.getsockname()[1]
+
+    with pytest.raises(SearchServerUnavailable) as error_info:
+        async with McpToolbox.connect(
+            f"http://user:s3cret-token@127.0.0.1:{free_port}/mcp?token=s3cret-token"
+        ):
+            pass
+    assert "s3cret-token" not in str(error_info.value)
+    assert f"127.0.0.1:{free_port}/mcp" in str(error_info.value)
