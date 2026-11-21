@@ -27,10 +27,10 @@ from graph.nodes.document_researcher import (
     document_findings,
     document_researcher_node,
     file_names_by_document_id,
-    without_quote_marks,
 )
 from graph.retrieval import HybridRetriever
 from graph.self_rag.graph import build_self_rag_graph
+from graph.self_rag.nodes import without_quote_marks
 from graph.self_rag.state import SelfRagResult
 from graph.state import SubQuestion
 from tests.conftest import ScriptedEmbeddings, ScriptedModel
