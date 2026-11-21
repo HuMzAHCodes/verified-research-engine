@@ -7,9 +7,17 @@ find what the tests miss. This script builds what it is given:
         REVIEW_PACK.md   what the project is, how to read the pack, the file map,
                          the coverage summary, every test with what it checks,
                          and the review prompt with its answer format
-        ALL_FILES.md     every packed file in one document, for tools that
-                         cannot open a zip of many files
+        FILES_<n>_<area>.md
+                         the packed files in a few documents, one per area of
+                         the project, each holding an area's code and its tests
+                         (for tools that cannot open a zip of many files)
         code/...         the packed files, at their paths in the repository
+
+REVIEW_PACK.md and the FILES documents are also written next to the zip, ready
+to upload. Each FILES document stays under PART_LIMIT_BYTES: the first tool
+used (Gemini, at the Phase 4 review) stopped reading one long document at about
+349 KB, partway through, without saying so. Each document therefore ends with a
+line that names it and counts its files, so a tool can be asked to quote it.
 
 Run from the project root:
 
@@ -28,6 +36,7 @@ with coverage, here, so the pack always describes the code it contains.
 """
 
 import ast
+import fnmatch
 import json
 import re
 import subprocess
@@ -55,13 +64,111 @@ NON_PYTHON_SUMMARIES = {
     "pyproject.toml": "Dependencies, and the settings of pytest, ruff, and coverage.",
     "scripts/start_mcp_servers.ps1": "Starts the local MCP servers on Windows and waits for them.",
 }
+# A part stays well under the 349 KB where the first review tool stopped reading.
+PART_LIMIT_BYTES = 250_000
+# Test helpers every area's tests use: repeated in every part.
+SHARED_PATHS = ("tests/conftest.py", "tests/pdf_fixtures.py")
+
+
+@dataclass(frozen=True)
+class ReviewArea:
+    slug: str
+    title: str
+    patterns: tuple[str, ...]
+
+
+# A file goes to the first area one of whose patterns it matches; the last
+# area takes everything else. Code sits in the same part as its tests.
+REVIEW_AREAS = (
+    ReviewArea(
+        "web",
+        "web search and page reading: search-mcp, the MCP client, web research",
+        (
+            "mcp_servers/search_mcp/*",
+            "graph/mcp_client.py",
+            "graph/extraction.py",
+            "graph/nodes/researcher.py",
+            "graph/prompts/web_findings.py",
+            "tests/unit/test_url_safety.py",
+            "tests/unit/test_fetch.py",
+            "tests/unit/test_search.py",
+            "tests/unit/test_search_mcp_server.py",
+            "tests/unit/test_mcp_client.py",
+            "tests/unit/test_fake_toolbox.py",
+            "tests/unit/test_extraction.py",
+            "tests/unit/test_web_findings_prompt.py",
+            "tests/unit/test_researcher.py",
+            "tests/unit/test_graph_imports.py",
+            "tests/live/test_search_mcp_live.py",
+            "tests/live/test_mcp_client_live.py",
+            "tests/live/test_extraction_live.py",
+        ),
+    ),
+    ReviewArea(
+        "documents",
+        "documents: pdf-parser-mcp, ingestion, the store, retrieval, Self-RAG",
+        (
+            "mcp_servers/pdf_parser_mcp/*",
+            "app/*",
+            "graph/document_store.py",
+            "graph/retrieval.py",
+            "graph/self_rag/*",
+            "graph/prompts/self_rag.py",
+            "graph/nodes/document_researcher.py",
+            "tests/unit/test_pdf_*.py",
+            "tests/unit/test_page_store.py",
+            "tests/unit/test_app_imports.py",
+            "tests/unit/test_chunking.py",
+            "tests/unit/test_ingestion.py",
+            "tests/unit/test_document_store.py",
+            "tests/unit/test_retrieval.py",
+            "tests/unit/test_self_rag*.py",
+            "tests/unit/test_document_researcher.py",
+            "tests/live/test_pdf_parser_live.py",
+            "tests/live/test_ingestion_live.py",
+            "tests/live/test_retrieval_live.py",
+            "tests/live/test_self_rag_live.py",
+        ),
+    ),
+    ReviewArea(
+        "graph",
+        "the research graph: planner, writer, supervisor, state, run budget, the brief",
+        (
+            "graph/nodes/planner.py",
+            "graph/nodes/writer.py",
+            "graph/supervisor.py",
+            "graph/state.py",
+            "graph/schemas.py",
+            "graph/report.py",
+            "graph/run_budget.py",
+            "graph/prompts/planner.py",
+            "graph/prompts/writer.py",
+            "tests/unit/test_graph.py",
+            "tests/unit/test_graph_documents.py",
+            "tests/unit/test_planner.py",
+            "tests/unit/test_writer.py",
+            "tests/unit/test_report.py",
+            "tests/unit/test_run_budget.py",
+            "tests/live/test_graph_live.py",
+            "tests/live/test_graph_documents_live.py",
+            "tests/live/test_planner_live.py",
+        ),
+    ),
+    ReviewArea(
+        "core",
+        "core: settings, the model gateway and its limits, secrets, tooling",
+        ("*",),
+    ),
+)
 CODE_LANGUAGES = {".py": "python", ".ps1": "powershell", ".toml": "toml", ".yml": "yaml"}
 
 REVIEW_PROMPT = """You are a senior test engineer reviewing a Python project's test suite. Your job
 is to find what the tests miss, not to praise them. The code and every test are
-in this pack (`code/`, or all in one document in `ALL_FILES.md`); this file maps
+in this pack (the FILES documents, or `code/` in the zip); this file maps
 them, lists every test with what it checks, and shows which lines no scripted
-test runs.
+test runs. If you were given only some of the FILES documents, review only the
+areas whose code you can read, say which those are, and make no finding about
+code you have not read.
 
 Find, in order of importance:
 
@@ -197,7 +304,16 @@ def inventory_of_tests(source: str) -> tuple[str, list[InventoryEntry]]:
     """A test module's summary line and its tests, each with what it checks."""
     module = ast.parse(source)
     source_lines = source.splitlines()
-    module_is_live = "pytestmark = pytest.mark.live" in source
+    # Only a real module-level `pytestmark = ...live...` marks the module, not the
+    # same words inside a string (this script's own tests hold them in one).
+    module_is_live = any(
+        isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "pytestmark" for target in node.targets
+        )
+        and "mark.live" in ast.unparse(node.value)
+        for node in module.body
+    )
     entries = []
     for node in module.body:
         if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
@@ -263,6 +379,8 @@ def render_review_pack(
     rows: list[CoverageRow],
     totals: dict,
     inventory: dict[str, tuple[str, list[InventoryEntry]]],
+    part_names: list[str],
+    part_by_path: dict[str, str],
 ) -> str:
     scripted_count = sum(1 for _, tests in inventory.values() for t in tests if not t.live)
     live_count = sum(1 for _, tests in inventory.values() for t in tests if t.live)
@@ -273,8 +391,11 @@ def render_review_pack(
         "",
         "## How to read this pack",
         "",
-        "- `code/` holds the project's code and tests at their paths in the repository; "
-        "`ALL_FILES.md` holds the same files in one document.",
+        "- The code and tests come in "
+        + ", ".join(f"`{name}`" for name in part_names)
+        + ": one document per area of the project, each with that area's code and its "
+        "tests; the zip also holds them in `code/`, at their paths in the repository. "
+        "The Part column of the file map says where each file is.",
         "- Tests marked **live** call real APIs and run only on request; every other test is "
         "**scripted**: no network, no keys, run on every push "
         '(`uv run pytest -m "not live"`).',
@@ -304,10 +425,11 @@ def render_review_pack(
         "",
         "## Files",
         "",
-        "| File | Lines | What it is |",
-        "| --- | --- | --- |",
+        "| File | Part | Lines | What it is |",
+        "| --- | --- | --- | --- |",
         *(
-            f"| `{path}` | {line_count} | {file_summaries.get(path, '')} |"
+            f"| `{path}` | {part_by_path.get(path, '')} | {line_count} | "
+            f"{file_summaries.get(path, '')} |"
             for path, line_count in file_lines.items()
         ),
         "",
@@ -332,13 +454,68 @@ def render_review_pack(
     return "\n".join(lines)
 
 
-def render_all_files(texts_by_path: dict[str, str]) -> str:
-    sections = ["# All packed files", ""]
+def area_of(path: str) -> str:
+    """The slug of the area a packed file belongs to."""
+    for area in REVIEW_AREAS:
+        if any(fnmatch.fnmatchcase(path, pattern) for pattern in area.patterns):
+            return area.slug
+    return REVIEW_AREAS[-1].slug
+
+
+def split_into_parts(paths: list[str]) -> dict[str, list[str]]:
+    """Each area's files, in area order; the shared test helpers in every part."""
+    shared = [path for path in paths if path in SHARED_PATHS]
+    parts: dict[str, list[str]] = {area.slug: list(shared) for area in REVIEW_AREAS}
+    for path in paths:
+        if path not in SHARED_PATHS:
+            parts[area_of(path)].append(path)
+    return {slug: part_paths for slug, part_paths in parts.items() if len(part_paths) > len(shared)}
+
+
+def part_file_name(number: int, slug: str) -> str:
+    return f"FILES_{number}_{slug}.md"
+
+
+def part_end_line(number: int, part_count: int, file_count: int) -> str:
+    return f"End of part {number} of {part_count}: {file_count} files."
+
+
+def render_part(texts_by_path: dict[str, str], *, number: int, part_count: int, title: str) -> str:
+    sections = [
+        f"# Review files, part {number} of {part_count}: {title}",
+        "",
+        f"{len(texts_by_path)} files. The shared test helpers (tests/conftest.py, "
+        "tests/pdf_fixtures.py) are repeated in every part.",
+        "",
+    ]
     for path, text in texts_by_path.items():
         language = CODE_LANGUAGES.get(Path(path).suffix, "")
         fence = "````" if "```" in text else "```"
         sections += [f"## `{path}`", "", f"{fence}{language}", text.rstrip("\n"), fence, ""]
-    return "\n".join(sections)
+    sections.append(part_end_line(number, part_count, len(texts_by_path)))
+    return "\n".join(sections) + "\n"
+
+
+def render_parts(texts_by_path: dict[str, str]) -> dict[str, str]:
+    """{file name: text} for every part; stops if a part is over PART_LIMIT_BYTES."""
+    parts = split_into_parts(list(texts_by_path))
+    titles = {area.slug: area.title for area in REVIEW_AREAS}
+    rendered = {}
+    for number, (slug, part_paths) in enumerate(parts.items(), start=1):
+        name = part_file_name(number, slug)
+        rendered[name] = render_part(
+            {path: texts_by_path[path] for path in part_paths},
+            number=number,
+            part_count=len(parts),
+            title=titles[slug],
+        )
+        size = len(rendered[name].encode("utf-8"))
+        if size > PART_LIMIT_BYTES:
+            raise SystemExit(
+                f"{name} is {size // 1024} KB, over the {PART_LIMIT_BYTES // 1024} KB a part "
+                "may hold; split its area in REVIEW_AREAS."
+            )
+    return rendered
 
 
 def run_scripted_tests_with_coverage() -> dict:
@@ -386,6 +563,12 @@ def main() -> None:
         for path, text in texts_by_path.items()
         if re.match(r"tests/.*test_[^/]*\.py$", path)
     }
+    parts = render_parts(texts_by_path)
+    part_numbers_by_path: dict[str, list[str]] = {}
+    for number, part_paths in enumerate(split_into_parts(paths).values(), start=1):
+        for path in part_paths:
+            part_numbers_by_path.setdefault(path, []).append(str(number))
+    part_by_path = {path: ", ".join(numbers) for path, numbers in part_numbers_by_path.items()}
     review_pack_text = render_review_pack(
         tag=tag,
         commit=commit,
@@ -395,11 +578,12 @@ def main() -> None:
         rows=coverage_rows(coverage_report),
         totals=coverage_report["totals"],
         inventory=inventory,
+        part_names=list(parts),
+        part_by_path=part_by_path,
     )
-    all_files_text = render_all_files(texts_by_path)
 
     leaks = secrets_found(
-        {**texts_by_path, "REVIEW_PACK.md": review_pack_text, "ALL_FILES.md": all_files_text},
+        {**texts_by_path, **parts, "REVIEW_PACK.md": review_pack_text},
         real_key_values(),
     )
     if leaks:
@@ -408,15 +592,25 @@ def main() -> None:
     zip_path = PACK_FOLDER / f"vre-review-pack-{tag}-{commit}.zip"
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as pack_zip:
         pack_zip.writestr("REVIEW_PACK.md", review_pack_text)
-        pack_zip.writestr("ALL_FILES.md", all_files_text)
+        for name, part_text in parts.items():
+            pack_zip.writestr(name, part_text)
         for path, text in texts_by_path.items():
             pack_zip.writestr(f"code/{path}", text)
+    for stale_part in PACK_FOLDER.glob("FILES_*.md"):
+        stale_part.unlink()
     (PACK_FOLDER / "REVIEW_PACK.md").write_text(review_pack_text, encoding="utf-8")
+    for name, part_text in parts.items():
+        (PACK_FOLDER / name).write_text(part_text, encoding="utf-8")
 
     test_count = sum(len(tests) for _, tests in inventory.values())
     print(f"Packed {len(paths)} files and {test_count} test functions")
     print(f"Coverage: {round(coverage_report['totals']['percent_covered'], 1)}%")
     print(f"Wrote {zip_path.relative_to(PROJECT_ROOT)} ({zip_path.stat().st_size // 1024} KB)")
+    for name, part_text in parts.items():
+        print(
+            f"  {name}: {len(part_text.encode('utf-8')) // 1024} KB, ends with: "
+            f"{part_text.rstrip().splitlines()[-1]}"
+        )
 
 
 if __name__ == "__main__":
