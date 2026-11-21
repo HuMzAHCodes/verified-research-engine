@@ -223,7 +223,8 @@ class IngestionService:
         Raises ScannedPdfRefused for a PDF with no text, and IngestionError for
         anything else that stops it: the file refused or the server down, an
         embedding that fails after its retries (TC-DOC-06), or the store
-        refusing the write. In every case nothing of the document is stored.
+        refusing the write or failing to make it. In every case nothing of the
+        document is stored.
         """
         started_at = time.perf_counter()
         pdf_path = Path(pdf_path)
@@ -262,7 +263,10 @@ class IngestionService:
             self.store.save(stored_document, stored_chunks, vectors)
         except ScannedPdfRefused:
             raise
-        except (PdfParserError, ModelCallError, DocumentStoreError) as error:
+        # OSError: the store's write itself failed (a full disk, a locked
+        # folder); its all-or-nothing save has already removed the partial
+        # folder (outside test review at the Phase 4 close, F-16).
+        except (PdfParserError, ModelCallError, DocumentStoreError, OSError) as error:
             raise IngestionError(
                 f"{pdf_path.name}: ingestion stopped and nothing was stored: {error}"
             ) from error
