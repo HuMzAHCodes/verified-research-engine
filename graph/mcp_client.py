@@ -19,6 +19,7 @@ research run; whoever runs the graph opens it with `async with` (decision 4):
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
@@ -68,6 +69,34 @@ class Toolbox(Protocol):
     async def fetch(self, url: str, max_chars: int = 6_000) -> WebPage: ...
 
 
+def address_without_secrets(address: str) -> str:
+    """A server address fit for an error message: no user, password, query, or fragment.
+
+    CONCEPT: mcp-client, D-63 (outside test review at the Phase 4 close, F-21).
+    Error messages reach logs, traces, and the caller; an access token put in
+    the address (as Phase 11's access check may) must not travel with them.
+    """
+    try:
+        address_parts = urlsplit(address)
+        port = address_parts.port
+    except ValueError:
+        return "the configured address"
+    if not address_parts.hostname:
+        return "the configured address"
+    host = address_parts.hostname
+    if ":" in host:
+        host = f"[{host}]"  # an IPv6 address
+    port_part = f":{port}" if port is not None else ""
+    return f"{address_parts.scheme}://{host}{port_part}{address_parts.path}"
+
+
+def server_label_for(server: "str | FastMCP") -> str:
+    """How errors name the server: its address without secrets, or the in-memory server's name."""
+    if isinstance(server, str):
+        return address_without_secrets(server)
+    return f"in-memory server {server.name}"
+
+
 def without_self(inputs: dict[str, Any]) -> dict[str, Any]:
     """Keep the toolbox object itself out of the trace; show only the arguments."""
     return {name: value for name, value in inputs.items() if name != "self"}
@@ -93,7 +122,7 @@ class McpToolbox:
         `server` is the server's address, or in tests the server object itself,
         which FastMCP's client then reaches in memory (decision 9).
         """
-        server_label = server if isinstance(server, str) else f"in-memory server {server.name}"
+        server_label = server_label_for(server)
         mcp_client = Client(server, timeout=call_timeout_seconds)
         # AsyncExitStack closes the connection when the block ends, while letting
         # this method tell a failure to connect apart from an error raised later
