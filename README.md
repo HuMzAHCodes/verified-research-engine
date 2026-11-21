@@ -86,13 +86,14 @@ The graph never imports a search, page-reading, or PDF library: it reaches tools
 | A model's limit is read from its replies, not from a console page; a refused request waits for the next minute and logs the limits the provider reports | `graph/llm.py` |
 | Sub-questions are researched in parallel branches; results are kept in the planner's order, whatever order the branches finish in | `graph/supervisor.py`, `graph/state.py` |
 | Ids (`Q2`, `Q2-F1`) are assigned by code, never by the model | `graph/nodes/planner.py`, `graph/extraction.py` |
-| The model proposes; code verifies: a passage is kept only if it is on its page | `graph/extraction.py` |
+| The model proposes; code verifies: a passage is kept only if it is on its page word for word, starting and ending on whole words and whole figures, so a cut-off "$1.2" never stands in for "$1.25 billion" | `graph/extraction.py` |
 | A document answer is checked for support and usefulness before it is used, and cites only the chunks that hold its supporting quotes, each an exact slice of its page | `graph/self_rag/`, `graph/nodes/document_researcher.py` |
 | A document search sees only the run's own documents | `graph/retrieval.py` |
 | Tools are reached only through MCP; the graph imports no tool library | `graph/mcp_client.py`, `tests/unit/test_graph_imports.py` |
 | A page that cannot be read is skipped; a search server that is gone stops the run | `graph/nodes/researcher.py` |
-| The search server refuses private and internal addresses, on every redirect | `mcp_servers/search_mcp/url_safety.py` |
+| The search server refuses private and internal addresses, on every redirect, including ones hidden inside IPv6 forms or written as numbers | `mcp_servers/search_mcp/url_safety.py` |
 | The whole graph is tested end to end with a scripted model, scripted embeddings, a fake toolbox, and a store in a temporary folder, with no network; replies to parallel calls are keyed to their prompt, so the tests do not depend on timing | `tests/` |
+| Every phase closes with an outside test review: a reviewer that has seen none of the work reads the code and tests and looks for what they miss. At the Phase 4 close, 393 passing tests and 96% coverage had missed 15 bugs; each was fixed only after a test failed on the old code (501 scripted tests and 98% coverage after) | `scripts/make_review_pack.py` |
 
 ## Stack
 
@@ -187,6 +188,8 @@ mcp_servers/
   pdf_parser_mcp/        reads PDF pages, only inside data/uploads/
 scripts/
   start_mcp_servers.ps1  starts both servers and waits until they listen
+  make_review_pack.py    builds the pack for the outside test review at each phase close
+  make_test_inventory.py lists the tests each phase added, from the tests and git history
 tests/
   unit/                  scripted tests: no keys, no network
   live/                  real API checks, run on request
