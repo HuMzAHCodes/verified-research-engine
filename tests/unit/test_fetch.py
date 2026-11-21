@@ -5,9 +5,13 @@ transport plays the websites and a fake resolver plays DNS, so these tests
 cover redirects, limits, content types, and text extraction with no network.
 """
 
+import asyncio
+import time
+
 import httpx
 import pytest
 
+import mcp_servers.search_mcp.fetch as fetch_module
 from mcp_servers.search_mcp.fetch import FetchLimits, PageFetchError, fetch_readable_page
 
 ARTICLE_PARAGRAPH = (
@@ -155,3 +159,98 @@ async def test_downloads_stop_at_the_size_limit():
     )
 
     assert len(fetched_page.text) <= 10_000
+
+
+# CONCEPT: building-search-mcp. The failure paths the outside test review at
+# the Phase 4 close found untested (F-10), and its F-13 and F-22.
+
+
+async def test_a_refused_connection_is_a_page_fetch_error():
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    with pytest.raises(PageFetchError, match="could not fetch example.com: ConnectError"):
+        await fetch_readable_page(
+            "https://example.com/a",
+            6_000,
+            resolver=resolve_to_public_or_private,
+            transport=httpx.MockTransport(refuse),
+        )
+
+
+async def test_a_server_that_never_answers_times_out():
+    async def hang(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(5)
+        return html_page()
+
+    with pytest.raises(PageFetchError, match="timed out after 0 s: example.com"):
+        await fetch_readable_page(
+            "https://example.com/a",
+            6_000,
+            limits=FetchLimits(timeout_seconds=0.1),
+            resolver=resolve_to_public_or_private,
+            transport=httpx.MockTransport(hang),
+        )
+
+
+async def test_a_redirect_without_a_location_fails():
+    with pytest.raises(PageFetchError, match="redirect without a location from example.com"):
+        await fetch("https://example.com/a", {"https://example.com/a": httpx.Response(302)})
+
+
+async def test_a_redirect_to_loopback_written_as_a_number_is_refused():
+    redirect = httpx.Response(302, headers={"location": "http://2130706433/admin"})
+
+    with pytest.raises(PageFetchError, match="blocked address: .*127.0.0.1"):
+        await fetch("https://example.com/start", {"https://example.com/start": redirect})
+
+
+@pytest.mark.parametrize(
+    "content_type", ["text/plain; charset=iso-8859-15", "text/html; charset=windows-1252"]
+)
+async def test_a_page_in_another_charset_is_decoded_with_it(content_type):
+    sentence = "Le caf\u00e9 co\u00fbte trois euros et demi pour les clients fid\u00e8les. "
+    page_text = sentence * 10
+    body = (
+        page_text
+        if "plain" in content_type
+        else f"<html><body><article><p>{page_text}</p></article></body></html>"
+    )
+    response = httpx.Response(
+        200, headers={"content-type": content_type}, content=body.encode(content_type.split("=")[1])
+    )
+
+    fetched_page = await fetch("https://example.com/fr", {"https://example.com/fr": response})
+
+    assert "caf\u00e9 co\u00fbte" in fetched_page.text
+    assert "\ufffd" not in fetched_page.text
+
+
+async def test_an_unknown_charset_falls_back_to_utf_8():
+    response = httpx.Response(
+        200,
+        headers={"content-type": "text/plain; charset=no-such-charset"},
+        content="Caf\u00e9 au lait.".encode(),
+    )
+
+    fetched_page = await fetch("https://example.com/t", {"https://example.com/t": response})
+
+    assert fetched_page.text == "Caf\u00e9 au lait."
+
+
+async def test_slow_text_extraction_counts_against_the_time_limit(monkeypatch):
+    def slow_extract(html: str) -> tuple[str, str]:
+        time.sleep(0.5)
+        return "x" * 400, "Title"
+
+    monkeypatch.setattr(fetch_module, "extract_main_text", slow_extract)
+    started_at = time.perf_counter()
+
+    with pytest.raises(PageFetchError, match="timed out"):
+        await fetch(
+            "https://example.com/a",
+            {"https://example.com/a": html_page()},
+            limits=FetchLimits(timeout_seconds=0.1),
+        )
+    # The call returns at the limit, not when the extraction finishes.
+    assert time.perf_counter() - started_at < 0.4
