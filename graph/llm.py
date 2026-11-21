@@ -576,6 +576,11 @@ def retry_after_seconds(error: BaseException) -> float | None:
         retry_at = parsedate_to_datetime(header_value)
     except (TypeError, ValueError):
         return None
+    if retry_at.tzinfo is None:
+        # "-0000" or no zone at all: HTTP dates are in GMT, so read it as UTC.
+        # Subtracting a date with no zone from one with a zone raised TypeError
+        # inside the retry (outside test review at the Phase 4 close, F-6).
+        retry_at = retry_at.replace(tzinfo=UTC)
     return max(0.0, (retry_at - datetime.now(UTC)).total_seconds())
 
 
