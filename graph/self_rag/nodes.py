@@ -178,21 +178,48 @@ async def check_support_node(state: Mapping[str, Any], *, gateway: ModelGateway)
     return {"support": reply.support, "support_quotes": list(reply.evidence)}
 
 
+# Characters a model puts around a quote, and an ellipsis at either end. They
+# are not in the chunk, so a quote is compared without them. Seen live in
+# Phase 4: IsSUP returned '"the transaction price allocated ..."'. Trimmed for
+# every quote, IsSUP's and P-13's alike (outside test review at the Phase 4
+# close, F-4: P-13's quotes were checked with their marks still on).
+QUOTE_MARKS = "\"'“”‘’«»`"
+ELLIPSES = ("...", "…")
+
+
+def without_quote_marks(quote: str) -> str:
+    """The quote without surrounding quote marks, ellipses, or spaces."""
+    trimmed_quote = quote.strip()
+    changed = True
+    while changed and trimmed_quote:
+        changed = False
+        for ellipsis in ELLIPSES:
+            if trimmed_quote.startswith(ellipsis):
+                trimmed_quote, changed = trimmed_quote[len(ellipsis) :].strip(), True
+            if trimmed_quote.endswith(ellipsis):
+                trimmed_quote, changed = trimmed_quote[: -len(ellipsis)].strip(), True
+        stripped = trimmed_quote.strip(QUOTE_MARKS).strip()
+        if stripped != trimmed_quote:
+            trimmed_quote, changed = stripped, True
+    return trimmed_quote
+
+
 def checked_quotes(
     proposed_quotes: list[str], chunks: list[RetrievedChunk]
 ) -> tuple[list[str], list[RetrievedChunk]]:
     """The quotes found word for word in a chunk, and the chunks they came from.
 
     Decision 8: the same rule as web passages (D-35, graph/extraction.py):
-    whitespace, quote marks, and dashes are made uniform on both sides, then
-    the quote must occur in the chunk. Quotes under MIN_PASSAGE_WORDS words
+    marks and ellipses around the quote are trimmed, whitespace, quote marks,
+    and dashes are made uniform on both sides, then the quote must occur in
+    the chunk on whole words (D-61). Quotes under MIN_PASSAGE_WORDS words
     are dropped too: "Walmart" alone is in 94 chunks and proves nothing.
     Duplicates are kept once; source chunks keep their retrieval order.
     """
     kept_quotes: list[str] = []
     source_chunk_ids: set[str] = set()
     for proposed_quote in proposed_quotes:
-        quote = proposed_quote.strip()
+        quote = without_quote_marks(proposed_quote)
         if len(normalise_for_matching(quote).split()) < MIN_PASSAGE_WORDS:
             continue
         sources = [chunk for chunk in chunks if occurs_in(quote, chunk.text)]
