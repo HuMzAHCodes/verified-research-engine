@@ -10,7 +10,7 @@ import re
 
 import pytest
 
-from graph.extraction import extract_web_findings, occurs_in
+from graph.extraction import cut_at_word, extract_web_findings, find_copy, occurs_in
 from graph.mcp_client import WebPage
 from graph.state import SubQuestion
 from tests.conftest import ScriptedModel
@@ -117,6 +117,98 @@ def test_the_matching_rule(passage, is_copy):
     assert occurs_in(passage, PAGE_ONE.text) is is_copy
 
 
+@pytest.mark.parametrize(
+    ("page_text", "passage"),
+    [
+        # "un" cut off the front: the meaning flips.
+        (
+            "The firm was unprofitable in each of the last three years.",
+            "profitable in each of the last three years.",
+        ),
+        # The last digit cut off the end: a different figure.
+        ("Total revenue for the year was $1.25 billion.", "Total revenue for the year was $1.2"),
+        # A figure cut at its thousands separator or decimal point.
+        ("The company had 1,250 employees at the end of the year.", "The company had 1"),
+        ("Revenue grew by 12.5 percent over the prior year.", "5 percent over the prior year."),
+        # A word cut at its end.
+        ("Symbotic sells warehouse automation to large retailers.", "Symbotic sells warehouse au"),
+    ],
+)
+def test_a_passage_cut_inside_a_word_or_figure_is_not_a_copy(page_text, passage):
+    # CONCEPT: verbatim-extraction, D-61 (outside test review, F-1).
+    assert occurs_in(passage, page_text) is False
+
+
+@pytest.mark.parametrize(
+    ("page_text", "passage"),
+    [
+        # A figure that ends the sentence: the full stop is not part of it.
+        ("Total revenue for the year was $1.2.", "Total revenue for the year was $1.2"),
+        # Punctuation at either end of the passage.
+        ("He said: (the largest customer) is Walmart.", "(the largest customer) is Walmart."),
+        # The first place is cut inside a word, a later one is whole: the later one counts.
+        (
+            "It was unprofitable in each year. It was profitable in each year.",
+            "profitable in each year.",
+        ),
+    ],
+)
+def test_a_passage_on_whole_words_is_a_copy(page_text, passage):
+    assert occurs_in(passage, page_text) is True
+
+
+@pytest.mark.parametrize(
+    ("page_text", "passage"),
+    [
+        # A PDF ligature, typed as two letters.
+        (
+            "Revenue for the \ufb01scal year ended September 27 grew.",
+            "Revenue for the fiscal year ended September 27 grew.",
+        ),
+        # A decomposed accent on the page, a composed one typed.
+        (
+            "Northwind is owned by Socie\u0301te\u0301 Ge\u0301ne\u0301rale and others.",
+            "Northwind is owned by Soci\u00e9t\u00e9 G\u00e9n\u00e9rale and others.",
+        ),
+        # A soft hyphen where the page may break a word.
+        (
+            "Our ware\u00adhouse systems are installed at forty sites.",
+            "Our warehouse systems are installed at forty sites.",
+        ),
+    ],
+)
+def test_the_same_text_in_another_unicode_form_still_matches(page_text, passage):
+    # CONCEPT: verbatim-extraction, D-61 (outside test review, F-12).
+    assert occurs_in(passage, page_text) is True
+
+
+def test_a_superscript_digit_is_not_folded_into_a_plain_one():
+    # Why NFKC was not chosen (D-61): it would make "10²" and "102" the same.
+    assert (
+        occurs_in("The area is 102 square metres in all.", "The area is 10² square metres in all.")
+        is False
+    )
+
+
+def test_the_copy_is_found_as_a_span_of_the_pages_own_text():
+    page_text = "Intro.  Walmart\u2019s   contract is\nthe company\u2019s largest. End."
+
+    copy_start, copy_end = find_copy("Walmart's contract is the company's largest.", page_text)
+
+    assert page_text[copy_start:copy_end] == (
+        "Walmart\u2019s   contract is\nthe company\u2019s largest."
+    )
+
+
+def test_text_is_cut_at_a_word():
+    assert cut_at_word("Symbotic sells warehouse automation.", 20) == "Symbotic sells"
+    assert cut_at_word("Symbotic sells warehouse automation.", 100) == (
+        "Symbotic sells warehouse automation."
+    )
+    # One word longer than the limit: nothing to cut at, so it is cut hard.
+    assert cut_at_word("Supercalifragilistic", 5) == "Super"
+
+
 async def test_a_url_that_was_not_given_is_dropped(make_gateway):
     result, _ = await extract(
         make_gateway,
@@ -190,8 +282,28 @@ async def test_a_passage_is_cut_after_it_has_been_checked(make_gateway):
         max_passage_chars=20,
     )
 
-    assert result.findings[0].passage == "Symbotic sells wareh"
+    # At a word: "wareh" would no longer be a copy of whole words (D-61).
+    assert result.findings[0].passage == "Symbotic sells"
+    assert occurs_in(result.findings[0].passage, PAGE_ONE.text)
     assert result.dropped == []
+
+
+async def test_a_kept_passage_is_the_pages_own_text(make_gateway):
+    # CONCEPT: verbatim-extraction, D-62 (outside test review, F-17). The model
+    # typed straight apostrophes; the page has curly ones and a line break.
+    result, _ = await extract(
+        make_gateway,
+        p02_reply(
+            proposed(
+                PAGE_ONE.url, "Walmart's contract is the company's largest, and accounted for most"
+            )
+        ),
+    )
+
+    assert result.findings[0].passage == (
+        "Walmart\u2019s contract is the company\u2019s largest, and accounted for\nmost"
+    )
+    assert result.findings[0].passage in PAGE_ONE.text
 
 
 async def test_no_pages_means_no_model_call(make_gateway):
