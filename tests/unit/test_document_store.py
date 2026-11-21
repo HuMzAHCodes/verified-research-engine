@@ -247,3 +247,38 @@ def test_chunks_returns_a_documents_chunks_in_index_order(store):
         "north text",
         "up text",
     ]
+
+
+def chunk_of_another_document(chunks, vectors):
+    return [chunks[0].model_copy(update={"document_id": "other-report"}), chunks[1]], vectors
+
+
+def chunk_past_the_last_page(chunks, vectors):
+    return [chunks[0], chunks[1].model_copy(update={"page": 9})], vectors
+
+
+def vectors_of_different_lengths(chunks, vectors):
+    return chunks, [EAST, [0.0, 1.0]]
+
+
+@pytest.mark.parametrize(
+    ("break_parts", "expected_message"),
+    [
+        (chunk_of_another_document, "belongs to 'other-report'"),
+        (chunk_past_the_last_page, "is on page 9, but the document has 2 pages"),
+        (vectors_of_different_lengths, "vectors of different lengths"),
+    ],
+)
+def test_a_foreign_chunk_a_page_past_the_end_or_ragged_vectors_are_refused(
+    store, break_parts, expected_message
+):
+    # CONCEPT: document-ingestion, the store's save checks no test ran (outside
+    # test review at the Phase 4 close, F-20). The page check keeps a
+    # citation's #page=N inside the document.
+    document, chunks = make_document("annual-report", ["east text", "north text"])
+    chunks, vectors = break_parts(chunks, [EAST, NORTH])
+
+    with pytest.raises(DocumentStoreError, match=expected_message):
+        store.save(document, chunks, vectors)
+
+    assert not store.vectors_dir.exists() or list(store.vectors_dir.iterdir()) == []
