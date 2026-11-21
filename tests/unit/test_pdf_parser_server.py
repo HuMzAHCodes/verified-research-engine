@@ -125,3 +125,17 @@ async def test_the_oldest_document_is_forgotten_when_the_store_is_full(uploads_f
         assert await read_page(client, "doc-2", 1) == "two"
         with pytest.raises(MCPError, match="call ingest_pdf first"):
             await read_page(client, "doc-1", 1)
+
+
+async def test_a_pdf_with_no_pages_is_a_tool_error():
+    # CONCEPT: pdf-parser-mcp, outside test review at the Phase 4 close (F-23).
+    # A reader that finds no pages at all: nothing is held, and the client is told.
+    def read_no_pages(path: str) -> list[str]:
+        return []
+
+    page_store = DocumentPageStore(max_documents=10)
+    async with Client(create_server(read_no_pages, page_store)) as client:
+        with pytest.raises(ToolError, match="the PDF has no pages"):
+            await ingest(client, "empty.pdf", "doc-1")
+        with pytest.raises(MCPError):
+            await read_page(client, "doc-1", 1)
