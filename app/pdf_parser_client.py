@@ -31,6 +31,8 @@ from fastmcp.exceptions import MCPError, ToolError
 from langsmith import traceable
 from pydantic import BaseModel, ValidationError
 
+from graph.mcp_client import server_label_for
+
 INGEST_TOOL_NAME = "ingest_pdf"
 PAGE_RESOURCE_TEMPLATE = "pdf://{document_id}/page/{page_number}"
 # Reading a 124-page PDF took 6.0 s (pdf-parser-mcp, "What we measured"); a
@@ -91,7 +93,7 @@ class PdfParserClient:
         `server` is the server's address, or in tests the server object itself,
         which FastMCP's client then reaches in memory.
         """
-        server_label = server if isinstance(server, str) else f"in-memory server {server.name}"
+        server_label = server_label_for(server)
         mcp_client = Client(server, timeout=call_timeout_seconds)
         # As in McpToolbox: a failure to connect is told apart from an error
         # raised later by the caller's own code inside the `async with` block.
