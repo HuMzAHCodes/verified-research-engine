@@ -48,29 +48,6 @@ logger = logging.getLogger(__name__)
 # goes to the web (graph/nodes/researcher.py, WEB_ROUTES).
 DOCUMENT_ROUTES = frozenset({"document", "both"})
 
-# Characters a model puts around a quote, and an ellipsis at either end. They
-# are not in the chunk, so a quote is compared without them. Seen live in
-# Phase 4: IsSUP returned '"the transaction price allocated ..."'.
-QUOTE_MARKS = "\"'“”‘’«»`"
-ELLIPSES = ("...", "…")
-
-
-def without_quote_marks(quote: str) -> str:
-    """The quote without surrounding quote marks, ellipses, or spaces."""
-    trimmed_quote = quote.strip()
-    changed = True
-    while changed and trimmed_quote:
-        changed = False
-        for ellipsis in ELLIPSES:
-            if trimmed_quote.startswith(ellipsis):
-                trimmed_quote, changed = trimmed_quote[len(ellipsis) :].strip(), True
-            if trimmed_quote.endswith(ellipsis):
-                trimmed_quote, changed = trimmed_quote[: -len(ellipsis)].strip(), True
-        stripped = trimmed_quote.strip(QUOTE_MARKS).strip()
-        if stripped != trimmed_quote:
-            trimmed_quote, changed = stripped, True
-    return trimmed_quote
-
 
 def cited_chunks(sub_question_id: str, result: SelfRagResult) -> list[RetrievedChunk]:
     """The chunks a document answer cites (choice A), in retrieval order.
@@ -81,9 +58,8 @@ def cited_chunks(sub_question_id: str, result: SelfRagResult) -> list[RetrievedC
     """
     if result.revised:
         return list(result.evidence)
-    _, quoted_chunks = checked_quotes(
-        [without_quote_marks(quote) for quote in result.support_quotes], result.evidence
-    )
+    # checked_quotes trims the quote marks a model puts around a quote.
+    _, quoted_chunks = checked_quotes(result.support_quotes, result.evidence)
     if quoted_chunks:
         return quoted_chunks
     logger.warning(
