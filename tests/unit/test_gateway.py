@@ -350,3 +350,40 @@ async def test_a_transport_retry_counts_against_the_budget(make_gateway):
 
 def test_a_call_outside_a_run_has_no_budget():
     assert current_call_budget() is None
+
+
+@pytest.mark.parametrize(
+    "header_value", ["Wed, 21 Oct 2015 07:28:00 -0000", "Wed, 21 Oct 2015 07:28:00"]
+)
+async def test_a_retry_after_date_without_a_zone_still_retries(recorded_waits, header_value):
+    # CONCEPT: shared-throttle, outside test review at the Phase 4 close (F-6):
+    # a date with no zone raised TypeError inside the retry. It is read as UTC;
+    # being in the past, it asks for no wait.
+    planner_model = ScriptedModel(
+        scripted_replies=[rate_limit_with_retry_after(header_value), VALID_PLAN]
+    )
+
+    planner_output = await call_planner(gateway_with_real_waits(planner_model))
+
+    assert planner_output.sub_questions[0].route == "web"
+    assert recorded_waits == [0.0]
+
+
+@pytest.mark.parametrize(
+    "network_error",
+    [
+        httpx.ReadTimeout("read timed out"),
+        httpx.ConnectError("connection refused"),
+        ConnectionResetError(10054, "connection reset by peer"),
+    ],
+)
+async def test_a_network_blip_is_retried_with_the_short_wait(recorded_waits, network_error):
+    # CONCEPT: shared-throttle, outside test review F-7: a timeout or a dropped
+    # connection is retried with the 2 s start, not the 20 s rate-limit wait.
+    planner_model = ScriptedModel(scripted_replies=[network_error, VALID_PLAN])
+
+    planner_output = await call_planner(gateway_with_real_waits(planner_model))
+
+    assert planner_output.sub_questions[0].route == "web"
+    assert len(planner_model.received_conversations) == 2
+    assert len(recorded_waits) == 1 and 2.0 <= recorded_waits[0] <= 3.0
