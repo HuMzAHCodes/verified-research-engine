@@ -20,6 +20,7 @@ from langchain_core.runnables import RunnableLambda
 from graph.document_store import DocumentStore, StoredChunk, StoredDocument, chunk_id_for
 from graph.llm import MODEL_CALL_BUDGET_KEY, ModelCallBudget
 from graph.retrieval import HybridRetriever
+from graph.run_budget import SELF_RAG_WORST_CHAT_CALLS, SELF_RAG_WORST_EMBEDDINGS
 from graph.self_rag.graph import build_self_rag_graph, run_self_rag
 from graph.self_rag.nodes import checked_quotes
 from tests.conftest import ScriptedEmbeddings, ScriptedModel
@@ -472,3 +473,50 @@ async def test_a_revised_or_not_found_result_has_no_issup_quotes(run_subgraph):
     # A revised answer is made of checked quotes, which give its citations.
     assert (revised.status, revised.support_quotes) == ("answered_with_quotes", [])
     assert (not_found.status, not_found.support_quotes) == ("not_found", [])
+
+
+async def test_a_revision_quote_inside_quote_marks_is_still_kept(run_subgraph):
+    # CONCEPT: self-rag, outside test review at the Phase 4 close (F-4). Models
+    # wrap quotes in quote marks (seen live with IsSUP); P-13's are trimmed too.
+    result, _, _ = await run_subgraph(
+        [
+            search_passage(FIRST_PASSAGE),
+            relevant("C1"),
+            draft("Northwind is a strong customer providing 60% of revenue."),
+            support("partially_supported"),
+            quotes(f"\u201c{ANSWER_TEXT}\u201d", f'"...{BACKGROUND_TEXT}"'),
+            usefulness("useful"),
+        ]
+    )
+
+    assert result.status == "answered_with_quotes"
+    assert result.answer == ANSWER_TEXT
+    assert [chunk.text for chunk in result.evidence] == [ANSWER_TEXT]
+
+
+async def test_the_longest_path_runs_and_costs_what_the_budget_assumes(run_subgraph):
+    # CONCEPT: self-rag and D-58, outside test review F-14. Pass one is revised
+    # and judged not useful; pass two is fully supported and useful: every
+    # cap reached, 11 chat calls and 2 embedding requests.
+    result, chat_model, embedding_model = await run_subgraph(
+        [
+            search_passage(FIRST_PASSAGE),
+            relevant("C2"),
+            draft("A strategic agreement."),
+            support("partially_supported"),
+            quotes(BACKGROUND_TEXT),
+            usefulness("not_useful"),
+            search_passage(SECOND_PASSAGE),
+            relevant("C1"),
+            draft("Northwind accounted for 60% of total revenue."),
+            support("fully_supported", ANSWER_TEXT),
+            usefulness("useful"),
+        ]
+    )
+
+    assert (result.status, result.revised) == ("answered", False)
+    # Pass two starts clean: its evidence only, not pass one's revised quotes.
+    assert [chunk.text for chunk in result.evidence] == [ANSWER_TEXT]
+    assert result.search_passages == [FIRST_PASSAGE, SECOND_PASSAGE]
+    assert len(chat_model.received_conversations) == SELF_RAG_WORST_CHAT_CALLS
+    assert len(embedding_model.received_batches) == SELF_RAG_WORST_EMBEDDINGS
