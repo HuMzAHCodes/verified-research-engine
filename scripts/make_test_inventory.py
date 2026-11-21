@@ -20,8 +20,9 @@ It reads the tests exactly as they are written; it asks nothing of them:
   from git history. A commit's phase is read from its message prefix
   (`[P2 mcp-client]` is Phase 2). A `[review]` commit is phase-close work
   (the outside test review, D-60, and this folder) and belongs to the close
-  of the last phase tagged before it; any other commit, to the phase after the
-  last tag before it.
+  of the phase of the last `[P<n> ...]` commit before it, whether the phase
+  was tagged before the review (as Phase 4 was) or after it (WORKFLOW.md);
+  any other commit, to the phase after the last tag before it.
 
 Only the part below GENERATED_MARKER is replaced; the part above it is kept
 as written. A file that does not exist yet is created with a placeholder
@@ -173,15 +174,36 @@ def last_phase_tag_before(commit_position: int, tag_positions: dict[int, int]) -
     )
 
 
+def last_prefixed_phases(commit_subjects: list[str]) -> list[int]:
+    """For each commit in order, the phase of the last `[P<n> ...]` commit up to it (0: none)."""
+    last_phase = 0
+    phases = []
+    for subject in commit_subjects:
+        prefix_match = PHASE_PREFIX_PATTERN.match(subject)
+        if prefix_match:
+            last_phase = int(prefix_match[1])
+        phases.append(last_phase)
+    return phases
+
+
 def origin_of(
-    commit_info: CommitInfo, commit_position: int, tag_positions: dict[int, int]
+    commit_info: CommitInfo,
+    commit_position: int,
+    tag_positions: dict[int, int],
+    last_prefixed_phase: int,
 ) -> OriginOfTest:
-    """The phase a commit belongs to, from its message prefix, else from the tags."""
+    """The phase a commit belongs to: from its message prefix, else from what came before it.
+
+    last_prefixed_phase is the phase of the last `[P<n> ...]` commit at or before
+    this one: a review belongs to the phase whose work it reviewed, whether that
+    phase was tagged before the review or after it.
+    """
     prefix_match = PHASE_PREFIX_PATTERN.match(commit_info.subject)
     if prefix_match:
         phase, at_review = int(prefix_match[1]), False
     elif commit_info.subject.startswith(REVIEW_PREFIX):
-        phase, at_review = last_phase_tag_before(commit_position, tag_positions), True
+        phase = last_prefixed_phase or last_phase_tag_before(commit_position, tag_positions)
+        at_review = True
     else:
         phase, at_review = last_phase_tag_before(commit_position, tag_positions) + 1, False
     # Phase 0 was the set-up before Phase 1; its tests are listed with Phase 1.
@@ -267,7 +289,9 @@ def collect_tests() -> tuple[list[InventoriedTest], str]:
         for path in git_output("ls-files", "tests").splitlines()
         if TEST_FILE_PATTERN.match(path)
     ]
-    commit_order = git_output("rev-list", "--reverse", "HEAD").split()
+    commit_lines = git_output("log", "--reverse", "--format=%H %s").splitlines()
+    commit_order = [line.split(" ", 1)[0] for line in commit_lines]
+    phase_before = last_prefixed_phases([line.partition(" ")[2] for line in commit_lines])
     position_of = {commit: position for position, commit in enumerate(commit_order)}
     tag_positions: dict[int, int] = {}
     for tag_line in git_output(
@@ -297,7 +321,8 @@ def collect_tests() -> tuple[list[InventoriedTest], str]:
             commit_info = by_file_and_name.get((path, entry.name)) or by_name.get(entry.name)
             origin = None
             if commit_info is not None:
-                origin = origin_of(commit_info, position_of[commit_info.commit], tag_positions)
+                position = position_of[commit_info.commit]
+                origin = origin_of(commit_info, position, tag_positions, phase_before[position])
             inventoried.append(InventoriedTest(path, entry, origin))
     return inventoried, git_output("rev-parse", "--short", "HEAD").strip()
 
