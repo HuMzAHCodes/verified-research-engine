@@ -97,3 +97,33 @@ async def test_an_empty_plan_fails_the_node(make_gateway):
 
     with pytest.raises(PlannerError, match="no sub-questions"):
         await run_planner(planner_model, make_gateway)
+
+
+async def test_a_blank_sub_question_is_not_kept(make_gateway):
+    # CONCEPT: structured-output-planning, outside test review at the Phase 4
+    # close (F-18): a blank question would be searched as "" and fail.
+    planner_model = ScriptedModel(
+        scripted_replies=[
+            {
+                "sub_questions": [
+                    {"text": "   ", "route": "web"},
+                    {"text": "Who are its customers?", "route": "web"},
+                ]
+            }
+        ]
+    )
+
+    planner_update = await run_planner(planner_model, make_gateway)
+
+    assert [(q.id, q.text) for q in planner_update["sub_questions"]] == [
+        ("Q1", "Who are its customers?")
+    ]
+
+
+async def test_a_plan_of_only_blank_questions_fails_the_node(make_gateway):
+    planner_model = ScriptedModel(
+        scripted_replies=[{"sub_questions": [{"text": " ", "route": "web"}]}]
+    )
+
+    with pytest.raises(PlannerError, match="no sub-questions"):
+        await run_planner(planner_model, make_gateway)
