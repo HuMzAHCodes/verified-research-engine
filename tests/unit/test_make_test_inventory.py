@@ -16,6 +16,7 @@ from scripts.make_test_inventory import (
     descriptions_of_tests,
     first_added_commits,
     last_phase_tag_before,
+    last_prefixed_phases,
     merge_into_file,
     origin_of,
     render_generated_part,
@@ -68,23 +69,40 @@ def test_the_last_phase_tag_before_a_commit():
 
 def test_a_commit_prefix_names_its_phase():
     origin = origin_of(
-        CommitInfo("abc", "[P3 shared-throttle] Added the limiter"), 9, TAG_POSITIONS
+        CommitInfo("abc", "[P3 shared-throttle] Added the limiter"), 9, TAG_POSITIONS, 2
     )
 
     # The prefix wins over the tags: work on Phase 3 is Phase 3's.
     assert (origin.phase, origin.at_review) == (3, False)
 
 
-def test_a_review_commit_belongs_to_the_close_of_the_last_tagged_phase():
-    origin = origin_of(CommitInfo("abc", "[review] Tested a fix"), 7, TAG_POSITIONS)
+def test_a_review_commit_belongs_to_the_close_of_the_phase_it_reviewed():
+    # WORKFLOW.md's order: Phase 2's work, its review, then its tag. The review
+    # comes before the phase-02 tag, but it reviewed Phase 2's work.
+    before_the_tag = origin_of(CommitInfo("abc", "[review] Tested a fix"), 5, TAG_POSITIONS, 2)
+    # Phase 4's order: tagged first, then reviewed.
+    after_the_tag = origin_of(CommitInfo("abc", "[review] Tested a fix"), 7, TAG_POSITIONS, 2)
+
+    assert (before_the_tag.phase, before_the_tag.at_review) == (2, True)
+    assert (after_the_tag.phase, after_the_tag.at_review) == (2, True)
+
+
+def test_a_review_before_any_phase_commit_falls_back_to_the_tags():
+    origin = origin_of(CommitInfo("abc", "[review] Tested a fix"), 7, TAG_POSITIONS, 0)
 
     assert (origin.phase, origin.at_review) == (2, True)
 
 
+def test_the_last_phase_commit_is_carried_through_other_commits():
+    subjects = ["Initial commit", "[P1 setup] a", "[review] b", "[P2 mcp-client] c", "Updated"]
+
+    assert last_prefixed_phases(subjects) == [0, 1, 1, 2, 2]
+
+
 def test_any_other_commit_belongs_to_the_phase_after_the_last_tag():
-    after_phase_one = origin_of(CommitInfo("abc", "Updated the file"), 4, TAG_POSITIONS)
-    before_any_tag = origin_of(CommitInfo("abc", "Initial commit"), 0, TAG_POSITIONS)
-    phase_zero_setup = origin_of(CommitInfo("abc", "[P0 setup] Added CI"), 0, TAG_POSITIONS)
+    after_phase_one = origin_of(CommitInfo("abc", "Updated the file"), 4, TAG_POSITIONS, 1)
+    before_any_tag = origin_of(CommitInfo("abc", "Initial commit"), 0, TAG_POSITIONS, 0)
+    phase_zero_setup = origin_of(CommitInfo("abc", "[P0 setup] Added CI"), 0, TAG_POSITIONS, 0)
 
     assert after_phase_one.phase == 2
     assert before_any_tag.phase == 1
