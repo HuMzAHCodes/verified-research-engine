@@ -14,13 +14,18 @@ CONCEPT: subgraph-wrapper. From Phase 4 the planner is shown the documents'
 file names, read from the store, not their ids (decision 7), and once the
 plan is checked it sizes the run's request budget to the plan (D-58, choice
 C): the plan is what decides how many branches of each kind will run.
+
+Outside test review at the Phase 4 close: a document id that is not in the
+store is refused before any model request (F-5), not found mid-run inside a
+document branch after requests were spent; and a blank sub-question is
+dropped (F-18), not sent to search as an empty query.
 """
 
 import logging
 from collections.abc import Mapping
 from typing import Any
 
-from graph.document_store import DocumentStore
+from graph.document_store import DocumentNotStored, DocumentStore
 from graph.llm import ModelGateway
 from graph.nodes.document_researcher import file_names_by_document_id
 from graph.prompts import planner as planner_prompt
@@ -52,6 +57,8 @@ async def planner_node(
     """
     topic: str = state["topic"]
     document_ids: list[str] = list(state.get("document_ids", []))
+    if document_store is not None:
+        ensure_documents_are_stored(document_store, document_ids)
     # Decision 7: the names P-01 can judge a file by, not a hex id.
     uploaded_file_names = (
         list(file_names_by_document_id(document_store, document_ids).values())
@@ -86,6 +93,19 @@ async def planner_node(
     return {"sub_questions": sub_questions}
 
 
+def ensure_documents_are_stored(document_store: DocumentStore, document_ids: list[str]) -> None:
+    """Raise DocumentNotStored, naming them, if any of the run's documents is not stored."""
+    missing_ids = [
+        document_id
+        for document_id in dict.fromkeys(document_ids)
+        if not document_store.has_document(document_id)
+    ]
+    if missing_ids:
+        raise DocumentNotStored(
+            f"not in the document store: {', '.join(missing_ids)}; ingest the file first"
+        )
+
+
 def check_planned_questions(
     planned_questions: list[PlannedQuestion],
     *,
@@ -97,6 +117,13 @@ def check_planned_questions(
     The model was told the cap and told whether files exist, but a prompt is
     a request. These checks make the rules hold whatever the model wrote.
     """
+    non_blank_questions = [question for question in planned_questions if question.text.strip()]
+    if len(non_blank_questions) < len(planned_questions):
+        logger.warning(
+            "planner returned %d blank sub-questions; dropped",
+            len(planned_questions) - len(non_blank_questions),
+        )
+    planned_questions = non_blank_questions
     if not planned_questions:
         raise PlannerError("the planner returned no sub-questions")
 
