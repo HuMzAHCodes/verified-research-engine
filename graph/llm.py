@@ -8,7 +8,8 @@ ModelGateway.structured(), which applies, in this order:
                              whole process (shared-throttle)
 3. the transport retry       429, 5xx, timeouts, dropped connections; 3 tries,
                              waiting as the provider asks or with a random spread;
-                             a 429 waits long enough to reach the next minute (D-55)
+                             a 429 waits long enough to reach the next minute (D-55);
+                             a used-up daily quota is never retried (D-67)
 4. the schema retry          a reply that does not fit the schema gets one
                              more try, with the validation error shown
 5. the trace tags            prompt id and version on every LangSmith run
@@ -30,7 +31,8 @@ can pass one that wraps scripted fakes instead of the real API.
 import asyncio
 import logging
 import random
-from collections.abc import Awaitable, Callable
+import re
+from collections.abc import Awaitable, Callable, Iterator
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any, Literal, TypeVar
@@ -38,6 +40,7 @@ from typing import Any, Literal, TypeVar
 import httpx
 from langchain.chat_models import init_chat_model
 from langchain_core.embeddings import Embeddings
+from langchain_core.exceptions import ModelConnectionError, ModelTimeoutError
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.rate_limiters import InMemoryRateLimiter
@@ -78,9 +81,22 @@ MAX_RETRY_WAIT_SECONDS = 60.0
 # used up (Phase 4, self-rag, step 4). 20 s, then 40 s, adds up to the whole
 # minute before the third and last attempt.
 RATE_LIMIT_WAIT_SECONDS = 20.0
-# The headers in which Mistral reports its limits and what is left of them
-# (x-ratelimit-limit-req-minute, x-ratelimit-remaining-tokens-minute, ...).
+# The headers in which Mistral and Groq report their limits and what is left
+# of them (x-ratelimit-limit-req-minute, x-ratelimit-remaining-tokens-minute,
+# ...). Gemini sends none: its refusal names the quota instead (D-67).
 RATE_LIMIT_HEADER_PREFIX = "x-ratelimit-"
+# How far down an error's chain of causes to look for the vendor's reply
+# (chat-provider-setting, decision 3). Google's refusal arrives two deep:
+# LangChain's error, raised from Google's, which holds the reply.
+MAX_CAUSE_DEPTH = 5
+# Google's structured error details (google.rpc): which quota was hit, and
+# how long to wait before trying again.
+GOOGLE_QUOTA_FAILURE_TYPE = "type.googleapis.com/google.rpc.QuotaFailure"
+GOOGLE_RETRY_INFO_TYPE = "type.googleapis.com/google.rpc.RetryInfo"
+# A daily quota as Google names it ("GenerateRequestsPerDayPerProjectPerModel-
+# FreeTier") and as Groq words it ("... on requests per day (RPD) ...").
+GOOGLE_DAILY_QUOTA_MARK = "PerDay"
+DAILY_LIMIT_IN_MESSAGE = re.compile(r"(?:requests|tokens) per day", re.IGNORECASE)
 # Where a run keeps its ModelCallBudget in its config (shared-throttle, choice C).
 MODEL_CALL_BUDGET_KEY = "model_call_budget"
 # Embedding batches that may wait for their replies at the same time (D-49).
@@ -162,17 +178,112 @@ def shared_rate_limiter(model_name: str, requests_per_second: float) -> InMemory
     return _shared_rate_limiters[model_name]
 
 
+def error_chain(error: BaseException) -> Iterator[BaseException]:
+    """The error, then what caused it, and so on, at most MAX_CAUSE_DEPTH deep.
+
+    CONCEPT: chat-provider-setting, decision 3 (D-66). Vendors wrap the
+    reply's error in their own: LangChain's GoogleRateLimitError is raised
+    from Google's ClientError, Groq's APIConnectionError from httpx's error.
+    """
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and len(seen) < MAX_CAUSE_DEPTH and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__
+
+
+def response_of(error: BaseException) -> httpx.Response | None:
+    """The vendor's HTTP reply, if the error or one of its causes carries one.
+
+    Mistral's error (httpx.HTTPStatusError), Groq's (APIStatusError), and
+    Google's (ClientError, under LangChain's) all keep it as `.response`.
+    """
+    for linked_error in error_chain(error):
+        response = getattr(linked_error, "response", None)
+        if isinstance(response, httpx.Response):
+            return response
+    return None
+
+
+def http_status_of(error: BaseException) -> int | None:
+    """The HTTP status of a refused request, from any vendor, or None.
+
+    CONCEPT: chat-provider-setting, decision 3 (D-66). One function for every
+    vendor: the status of the reply in the error or one of its causes, else an
+    integer `code` (Google's errors keep one even without the reply).
+    """
+    response = response_of(error)
+    if response is not None:
+        return response.status_code
+    for linked_error in error_chain(error):
+        code = getattr(linked_error, "code", None)
+        if isinstance(code, int) and 100 <= code <= 599:
+            return code
+    return None
+
+
+def google_error_details(error: BaseException) -> list[dict[str, Any]]:
+    """Google's structured details of a refusal (google.rpc), or an empty list.
+
+    Google's error keeps the reply's JSON as `.details`: either
+    {"error": {"details": [...]}} or the inner part alone.
+    """
+    for linked_error in error_chain(error):
+        reply_json = getattr(linked_error, "details", None)
+        if not isinstance(reply_json, dict):
+            continue
+        error_body = reply_json.get("error", reply_json)
+        detail_items = error_body.get("details") if isinstance(error_body, dict) else None
+        if isinstance(detail_items, list):
+            return [item for item in detail_items if isinstance(item, dict)]
+    return []
+
+
+def daily_quota_used_up(error: BaseException) -> str | None:
+    """Which daily quota a 429 says is used up, or None for any other error.
+
+    CONCEPT: chat-provider-setting, decision 4 (D-67). Google names the quota
+    in a QuotaFailure (an id with "PerDay" in it); Groq says so in its message
+    ("requests per day"). A per-minute 429 gives None, so it is retried.
+    """
+    if http_status_of(error) != 429:
+        return None
+    for detail in google_error_details(error):
+        if detail.get("@type") != GOOGLE_QUOTA_FAILURE_TYPE:
+            continue
+        for violation in detail.get("violations") or []:
+            quota_id = str(violation.get("quotaId", ""))
+            if GOOGLE_DAILY_QUOTA_MARK in quota_id:
+                return quota_id
+    for linked_error in error_chain(error):
+        daily_limit = DAILY_LIMIT_IN_MESSAGE.search(str(linked_error))
+        if daily_limit is not None:
+            return daily_limit.group(0)
+    return None
+
+
 def is_transient_error(error: BaseException) -> bool:
     """True for failures that may succeed if the same request is sent again.
 
     A rate limit (429) or a server error (5xx) usually clears after a wait.
     A timeout or a dropped connection (WinError 10054) is a network blip.
-    A 400 or 401 means a bad request or a bad key: sending it again cannot
-    help, so those fail at once.
+    A 400 or 401 means a bad request or a bad key, and a 402 an account
+    without API access (Mistral, Phase 5): sending it again cannot help, so
+    those fail at once. So does a used-up daily quota (D-67): it does not
+    clear within a run. The status is read the same way for every vendor
+    (http_status_of); a network failure may sit under a vendor's own error.
     """
-    if isinstance(error, httpx.HTTPStatusError):
-        return error.response.status_code in RETRYABLE_STATUS_CODES
-    return isinstance(error, (httpx.RequestError, ConnectionError))
+    status = http_status_of(error)
+    if status is not None:
+        return status in RETRYABLE_STATUS_CODES and daily_quota_used_up(error) is None
+    network_failures = (
+        httpx.RequestError,
+        ConnectionError,
+        ModelConnectionError,
+        ModelTimeoutError,
+    )
+    return any(isinstance(linked_error, network_failures) for linked_error in error_chain(error))
 
 
 def build_one_token_per_text_tokenizer() -> Tokenizer:
@@ -503,6 +614,17 @@ class ModelGateway:
             try:
                 return await send_request()
             except Exception as error:
+                # CONCEPT: chat-provider-setting, decision 4 (D-67). No retry
+                # within a run can succeed before the daily reset, so say
+                # which quota and what to do, instead of "failed after 3".
+                used_up_quota = daily_quota_used_up(error)
+                if used_up_quota is not None:
+                    raise ModelCallError(
+                        f"{prompt_id} ({tier}, {self.model_names_by_tier[tier]}): the daily "
+                        f"quota is used up ({used_up_quota}). It resets once a day, so a "
+                        "retry cannot help: wait for the reset, or set VRE_CHAT_PROVIDER "
+                        "to the backup vendor in .env"
+                    ) from error
                 if not is_transient_error(error):
                     raise ModelCallError(f"{prompt_id}: {error}") from error
                 limits_reported = rate_limit_report(error)
@@ -537,8 +659,8 @@ class ModelGateway:
 
 
 def is_rate_limit_error(error: BaseException) -> bool:
-    """True for a 429: the provider refused because a limit was reached."""
-    return isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 429
+    """True for a 429, from any vendor: the provider refused because a limit was reached."""
+    return http_status_of(error) == 429
 
 
 def retry_wait_seconds(
@@ -549,7 +671,8 @@ def retry_wait_seconds(
 ) -> float:
     """How long to wait before the next attempt (shared-throttle, choice B; D-55).
 
-    If the provider said how long to wait (Retry-After), wait that long. If not,
+    If the provider said how long to wait (Retry-After, or Gemini's
+    retryDelay), wait that long. If not,
     a 429 starts from rate_limit_wait_seconds (20 s), because the limit it hit
     is counted per minute; any other transient failure (5xx, a timeout, a
     dropped connection) starts from base_wait_seconds (2 s). Either start
@@ -569,30 +692,49 @@ def rate_limit_report(error: BaseException) -> str:
     """The provider's limit headers on a refused request, for the log (D-55).
 
     For example " [limits: limit-req-minute=2, remaining-req-minute=0]". Empty
-    when the error has no response or the response has no such headers.
+    when the error has no response or the response has no such headers
+    (Gemini sends none; its quota is named in the error itself).
     """
-    if not isinstance(error, httpx.HTTPStatusError):
+    response = response_of(error)
+    if response is None:
         return ""
     reported_limits = [
         f"{header_name.lower().removeprefix(RATE_LIMIT_HEADER_PREFIX)}={header_value}"
-        for header_name, header_value in sorted(error.response.headers.items())
+        for header_name, header_value in sorted(response.headers.items())
         if header_name.lower().startswith(RATE_LIMIT_HEADER_PREFIX)
     ]
     return f" [limits: {', '.join(reported_limits)}]" if reported_limits else ""
 
 
-def retry_after_seconds(error: BaseException) -> float | None:
-    """The wait a Retry-After header asks for, in seconds, if the error has one.
+def google_retry_delay_seconds(error: BaseException) -> float | None:
+    """The wait Gemini's RetryInfo asks for ("39s" or "1.5s"), or None.
 
-    The header holds either a number of seconds ("2") or a date. Whether the
-    provider sends it is not assumed: no header, or one that cannot be read,
-    gives None, and the caller falls back to its own waits.
+    CONCEPT: chat-provider-setting, decision 4 (D-67). Gemini sends no
+    Retry-After header; a per-minute refusal carries the wait in its details.
     """
-    if not isinstance(error, httpx.HTTPStatusError):
-        return None
-    header_value = error.response.headers.get("retry-after")
+    for detail in google_error_details(error):
+        if detail.get("@type") != GOOGLE_RETRY_INFO_TYPE:
+            continue
+        delay_text = str(detail.get("retryDelay", "")).strip().removesuffix("s")
+        try:
+            return max(0.0, float(delay_text))
+        except ValueError:
+            return None
+    return None
+
+
+def retry_after_seconds(error: BaseException) -> float | None:
+    """The wait the provider asks for, in seconds, if the error names one.
+
+    A Retry-After header (Mistral, Groq) holds either a number of seconds
+    ("2") or a date; Gemini puts the wait in its RetryInfo instead. Whether
+    the provider sends either is not assumed: none, or one that cannot be
+    read, gives None, and the caller falls back to its own waits.
+    """
+    response = response_of(error)
+    header_value = response.headers.get("retry-after") if response is not None else None
     if header_value is None:
-        return None
+        return google_retry_delay_seconds(error)
     try:
         return max(0.0, float(header_value))
     except ValueError:
