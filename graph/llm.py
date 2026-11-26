@@ -1,4 +1,4 @@
-"""Model gateway: the only place that builds Mistral models and calls them.
+"""Model gateway: the only place that builds the models and calls them.
 
 CONCEPT: model-gateway. Every model decision in the graph goes through
 ModelGateway.structured(), which applies, in this order:
@@ -18,8 +18,13 @@ ModelGateway.embed(), a third tier with the same budget, throttle, and
 transport retry, and its own trace run per request. There is no schema retry:
 an embedding reply is a list of numbers, not an answer that can misfit.
 
-Nodes never import ChatMistralAI or MistralAIEmbeddings. They receive a
-gateway, so tests can pass one that wraps scripted fakes instead of the real API.
+CONCEPT: chat-provider-setting (D-66). The chat vendor is a setting
+(VRE_CHAT_PROVIDER): build_chat_model hands the vendor, the model name, and
+that vendor's key to LangChain's init_chat_model, which returns the vendor's
+own chat model (ChatGoogleGenerativeAI, ChatGroq, ChatMistralAI).
+
+Nodes never import a vendor's model class. They receive a gateway, so tests
+can pass one that wraps scripted fakes instead of the real API.
 """
 
 import asyncio
@@ -31,18 +36,19 @@ from email.utils import parsedate_to_datetime
 from typing import Any, Literal, TypeVar
 
 import httpx
+from langchain.chat_models import init_chat_model
 from langchain_core.embeddings import Embeddings
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.rate_limiters import InMemoryRateLimiter
 from langchain_core.runnables import RunnableConfig
 from langchain_core.runnables.config import ensure_config
-from langchain_mistralai import ChatMistralAI, MistralAIEmbeddings
+from langchain_mistralai import MistralAIEmbeddings
 from langsmith import traceable
-from pydantic import BaseModel
+from pydantic import BaseModel, SecretStr
 from tokenizers import Tokenizer, models
 
-from settings import settings
+from settings import ChatProvider, settings
 
 logger = logging.getLogger(__name__)
 
@@ -192,12 +198,17 @@ def build_mistral_embeddings(model_name: str) -> MistralAIEmbeddings:
 
     max_retries=None switches off its retry (tenacity, 5 attempts with fixed
     30 s waits), so the gateway's retry is the only retry layer, as for chat
-    (build_mistral_model). The local tokenizer stops it downloading one and
+    (build_chat_model). The local tokenizer stops it downloading one and
     re-splitting batches (build_one_token_per_text_tokenizer).
+
+    Mistral refuses every request from Phase 5 (402, D-65); the embeddings
+    stay here until concept local-embeddings moves them to this machine.
+    With no Mistral key set, the client is built with an empty one and its
+    first request is refused at once.
     """
     return MistralAIEmbeddings(
         model=model_name,
-        api_key=settings.mistral_api_key,
+        api_key=settings.mistral_api_key or SecretStr(""),
         max_retries=None,
         timeout=REQUEST_TIMEOUT_SECONDS,
         tokenizer=build_one_token_per_text_tokenizer(),
@@ -253,22 +264,36 @@ async def send_embedding_request(
     return await embedding_model.aembed_documents(texts)
 
 
-def build_mistral_model(model_name: str) -> ChatMistralAI:
-    """A Mistral chat model with project-wide settings.
+def build_chat_model(provider: ChatProvider, model_name: str, api_key: SecretStr) -> BaseChatModel:
+    """A chat model from any configured vendor, with project-wide settings.
+
+    CONCEPT: chat-provider-setting, decision 2 (D-66). init_chat_model is
+    LangChain's own way to choose a model by vendor and name: it imports the
+    vendor's package and returns that vendor's chat model. Building a client
+    sends no request.
 
     temperature=0 so the same prompt gives the same answer, which makes runs
-    comparable across prompt versions. max_retries=1 switches off the client's
-    own retry (its count is total attempts, so 1 means a single try): the
-    gateway's retry is the only retry layer, so waits do not multiply and
-    every retry is logged in one place.
+    comparable across prompt versions (Groq's client stores it as 1e-08, its
+    own floor). max_retries=1 is a single attempt in every client, checked in
+    each: Google's default is 6 attempts, Groq's 2, Mistral's counts total
+    attempts too. The gateway's retry is the only retry layer, so waits do not
+    multiply, every retry is logged in one place, and no retry bypasses the
+    shared limiter. timeout is in seconds for every vendor (Google's client
+    takes milliseconds underneath; LangChain converts).
     """
-    return ChatMistralAI(
-        model=model_name,
+    return init_chat_model(
+        model_name,
+        model_provider=provider,
         temperature=0,
-        api_key=settings.mistral_api_key,
         max_retries=1,
         timeout=REQUEST_TIMEOUT_SECONDS,
+        api_key=api_key,
     )
+
+
+def build_configured_chat_model(model_name: str) -> BaseChatModel:
+    """A chat model from the vendor and key in settings (VRE_CHAT_PROVIDER)."""
+    return build_chat_model(settings.vre_chat_provider, model_name, settings.chat_api_key())
 
 
 class ModelGateway:
@@ -287,8 +312,8 @@ class ModelGateway:
         # Tests pass scripted models here; in normal use all three are built
         # from settings.
         self.models_by_tier: dict[ModelTier, BaseChatModel] = {
-            "decision": decision_model or build_mistral_model(settings.vre_chat_model),
-            "writer": writer_model or build_mistral_model(settings.vre_writer_model),
+            "decision": decision_model or build_configured_chat_model(settings.vre_chat_model),
+            "writer": writer_model or build_configured_chat_model(settings.vre_writer_model),
         }
         if embedding_model is None:
             quiet_embeddings_client_errors()
@@ -594,7 +619,10 @@ def describe_schema_failure(reply: dict[str, Any]) -> str:
     parsing_error = reply.get("parsing_error")
     if parsing_error is not None:
         return str(parsing_error)
-    return "the model answered in text instead of calling the output tool"
+    # CONCEPT: chat-provider-setting, decision 2. Vendors answer a structured
+    # request differently (Gemini with JSON text, Groq and Mistral with a tool
+    # call), so the message names neither.
+    return "the reply held no structured answer to read"
 
 
 def repair_instruction(schema: type[BaseModel], reply: dict[str, Any]) -> str:
@@ -608,6 +636,6 @@ def repair_instruction(schema: type[BaseModel], reply: dict[str, Any]) -> str:
         f"Your previous answer did not fit the required {schema.__name__} format.\n"
         f"Problem: {describe_schema_failure(reply)}\n"
         f"Previous answer: {previous_answer[:1000]}\n"
-        f"Answer the original request again by calling the {schema.__name__} tool, "
+        f"Answer the original request again in the {schema.__name__} format, "
         "with every required field filled in and only the allowed values."
     )
