@@ -99,7 +99,11 @@ async def test_text_instead_of_a_tool_call_is_retried(make_gateway):
 
     assert planner_output.sub_questions[0].route == "web"
     repair_message = planner_model.received_conversations[1][-1].content
-    assert "answered in text" in repair_message
+    # CONCEPT: chat-provider-setting, decision 2. The repair names no tool:
+    # Gemini answers a structured request with JSON text, not a tool call.
+    assert "held no structured answer" in repair_message
+    assert "Here are some questions..." in repair_message
+    assert "tool" not in repair_message
 
 
 async def test_rate_limit_is_retried(make_gateway):
