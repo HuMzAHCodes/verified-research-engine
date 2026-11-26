@@ -6,16 +6,17 @@ place that knows the variable names, their defaults, and their allowed ranges.
 """
 
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
-from pydantic import Field, SecretStr, ValidationInfo, field_validator
+from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Copy the key=value lines from .env into the process environment before
-# anything else runs. LangChain and LangSmith read their own variables
-# (MISTRAL_API_KEY, LANGSMITH_TRACING, LANGSMITH_PROJECT) straight from the
-# environment, not from the Settings object, so this has to happen first.
+# anything else runs. LangSmith reads its own variables (LANGSMITH_TRACING,
+# LANGSMITH_PROJECT) straight from the environment, not from the Settings
+# object, so this has to happen first.
 # Existing environment variables win over .env, which is what CI relies on.
 load_dotenv()
 
@@ -34,6 +35,19 @@ DEFAULT_MCP_URLS = {
     "vre_pdf_parser_mcp_url": DEFAULT_PDF_PARSER_MCP_URL,
 }
 
+# CONCEPT: chat-provider-setting, decision 2 (D-66). The chat vendors this
+# project has tried or set up, by the names LangChain's init_chat_model uses.
+# A Literal, so a typo in VRE_CHAT_PROVIDER stops the program at start-up.
+ChatProvider = Literal["google_genai", "groq", "mistralai"]
+
+# The setting that holds each vendor's key. Only the chosen vendor's key is
+# required; the others may be absent.
+API_KEY_SETTING_BY_PROVIDER: dict[str, str] = {
+    "google_genai": "google_api_key",
+    "groq": "groq_api_key",
+    "mistralai": "mistral_api_key",
+}
+
 
 class Settings(BaseSettings):
     """Typed view of the environment.
@@ -49,10 +63,17 @@ class Settings(BaseSettings):
 
     # Secrets. SecretStr hides the value when printed or logged ("**********");
     # the real value is read only where a client is built, with
-    # .get_secret_value(). No default, so a missing key is an error.
-    mistral_api_key: SecretStr
+    # .get_secret_value(). Tavily and LangSmith have no default, so a missing
+    # key is an error. Each chat vendor's key may be absent, except the chosen
+    # vendor's (require_the_chosen_vendors_key, D-66).
     tavily_api_key: SecretStr
     langsmith_api_key: SecretStr
+    google_api_key: SecretStr | None = None
+    groq_api_key: SecretStr | None = None
+    # Mistral refused every request from Phase 5 (402, D-65). Kept so Mistral
+    # stays a valid vendor (D-68); the embeddings use it until concept
+    # local-embeddings moves them to this machine.
+    mistral_api_key: SecretStr | None = None
 
     # Tracing. Kept here so the values are validated and visible in one place,
     # even though LangSmith itself reads them from the environment.
@@ -60,18 +81,18 @@ class Settings(BaseSettings):
     langsmith_project: str = "vre-dev"
 
     # Models. The decision prompts and the writer prompts each name a tier, so
-    # the two can run on different models (D-24). D-55: Mistral cut the Free
-    # plan's Ministral models (3b, 8b, 14b) and codestral to 2 requests a
-    # minute; Small and Magistral answered with a limit of 0, Large with "not
-    # available in your subscription tier". Of the chat models with function
-    # calling that this key can see, only Voxtral Small allows more: 60
-    # requests and 50,000 tokens a minute (Mistral's reply headers, read in
-    # Phase 4; the console's Limits page proved wrong). It is listed as an
-    # audio model but answers text and calls functions, and is built on
-    # Mistral Small (24B). Both tiers use it for now; pinned by its dated
-    # name, since the old "-latest" alias had silently moved to a new model.
-    vre_chat_model: str = "voxtral-small-2507"
-    vre_writer_model: str = "voxtral-small-2507"
+    # the two can run on different models (D-24). CONCEPT: chat-provider-setting
+    # (D-65, D-66). The vendor is a setting; the default is the Gemini API's
+    # free tier, after Mistral's free plan stopped including API access at the
+    # Phase 5 opening. Each tier gets its own Flash-Lite model, because Google
+    # counts the daily quota per model: 500 requests a day each, 1,000
+    # together (our AI Studio page). The decision tier makes most calls and
+    # carries P-02's word-for-word copying, so it gets the newer model. Pinned
+    # names only: never "-latest", which can move to another model, and never
+    # "-preview", which can be withdrawn.
+    vre_chat_provider: ChatProvider = "google_genai"
+    vre_chat_model: str = "gemini-3.5-flash-lite"
+    vre_writer_model: str = "gemini-3.1-flash-lite"
     vre_embed_model: str = "mistral-embed"
 
     # Caps and limits. Field(ge=..., le=...) rejects out-of-range values at
@@ -80,15 +101,15 @@ class Settings(BaseSettings):
     vre_max_revisions: int = Field(default=3, ge=0, le=10)
     vre_passage_max_chars: int = Field(default=1500, ge=200)
 
-    # CONCEPT: shared-throttle (D-43, D-55). One rate per model tier, in
-    # requests a second, at 80% of the measured limit: Voxtral Small allows 60
-    # a minute, 1 a second, so 0.8. The other fifth is room for a live test at
-    # the same time, the Phase 5 citation checker, and clock differences. Both
-    # tiers name the same model, so they share its one limiter (the registry
-    # is keyed by model name), as the account's limit requires. D-43 set 2.5
-    # and 0.4 for the Ministral models it replaced.
-    vre_decision_rps: float = Field(default=0.8, gt=0)
-    vre_writer_rps: float = Field(default=0.8, gt=0)
+    # CONCEPT: shared-throttle (D-43), chat-provider-setting (D-65). One rate
+    # per model tier, in requests a second, at 80% of the model's limit: both
+    # Flash-Lite models allow 15 a minute, so 12 a minute, 0.2 a second. The
+    # other fifth is room for a live test at the same time and for clock
+    # differences. The registry of limiters is keyed by model name, so the two
+    # tiers, on two models, each have their own. D-55 set 0.8 for Mistral's
+    # Voxtral Small (60 a minute), which both tiers shared.
+    vre_decision_rps: float = Field(default=0.2, gt=0)
+    vre_writer_rps: float = Field(default=0.2, gt=0)
     # Requests to the model one run may send, retries included (D-41, D-43).
     # A Phase 3 brief sends at most 14, or 28 if every call needed its schema
     # retry; going over stops the run instead of letting a loop keep spending.
@@ -113,7 +134,7 @@ class Settings(BaseSettings):
     vre_pdf_parser_mcp_url: str = DEFAULT_PDF_PARSER_MCP_URL
     vre_price_per_million_tokens: float = Field(default=0.0, ge=0)
 
-    @field_validator("mistral_api_key", "tavily_api_key", "langsmith_api_key")
+    @field_validator("tavily_api_key", "langsmith_api_key")
     @classmethod
     def reject_empty_api_key(cls, api_key: SecretStr) -> SecretStr:
         """Treat an empty key as missing.
@@ -124,6 +145,41 @@ class Settings(BaseSettings):
         """
         if not api_key.get_secret_value().strip():
             raise ValueError("is empty; set it in .env")
+        return api_key
+
+    @field_validator("google_api_key", "groq_api_key", "mistral_api_key", mode="before")
+    @classmethod
+    def blank_vendor_key_is_absent(cls, api_key: object) -> object:
+        """An empty vendor key counts as absent, like a missing line.
+
+        .env.example lists every vendor's key with an empty value; copied into
+        .env, the unused ones must not count as set.
+        """
+        if isinstance(api_key, str) and not api_key.strip():
+            return None
+        return api_key
+
+    @model_validator(mode="after")
+    def require_the_chosen_vendors_key(self) -> "Settings":
+        """The chosen vendor's key must be set; the others may be absent (D-66).
+
+        Checked at start-up, so a run never reaches the planner only to fail
+        with a vague 401 from the provider.
+        """
+        key_setting = API_KEY_SETTING_BY_PROVIDER[self.vre_chat_provider]
+        if getattr(self, key_setting) is None:
+            raise ValueError(
+                f"{key_setting.upper()} is missing or empty, and "
+                f"VRE_CHAT_PROVIDER={self.vre_chat_provider} needs it; set it in .env"
+            )
+        return self
+
+    def chat_api_key(self) -> SecretStr:
+        """The key of the chosen chat vendor (require_the_chosen_vendors_key ensures it)."""
+        key_setting = API_KEY_SETTING_BY_PROVIDER[self.vre_chat_provider]
+        api_key = getattr(self, key_setting)
+        if api_key is None:  # only if the setting was changed after start-up
+            raise ValueError(f"{key_setting.upper()} is missing or empty; set it in .env")
         return api_key
 
     @field_validator("vre_search_mcp_url", "vre_pdf_parser_mcp_url")
