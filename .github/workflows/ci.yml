@@ -9,10 +9,12 @@ jobs:
   lint-and-test:
     runs-on: ubuntu-latest
 
-    # Placeholder keys: settings.py refuses to start without non-empty keys,
+    # Placeholder keys: settings.py refuses to start without non-empty keys
+    # (the chosen chat vendor's, Gemini by default, plus Tavily and LangSmith),
     # but the scripted tests never call a real API, so any value works.
     # Real keys never go into CI. Tracing is off so no trace is attempted.
     env:
+      GOOGLE_API_KEY: ci-placeholder
       MISTRAL_API_KEY: ci-placeholder
       TAVILY_API_KEY: ci-placeholder
       LANGSMITH_API_KEY: ci-placeholder
